@@ -159,4 +159,19 @@ cmake -S . -B build-arm32 \
 
 cmake --build build-arm32 --target mediacontroller
 
+
+rm -rf build-android && \
+. "$HOME/shared/platforms/android/env.sh" && \
+cmake -S . -B build-android   \
+  -DCMAKE_BUILD_TYPE=Debug   \
+  -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+  -DANDROID_ABI="$GRPC_ANDROID_ABI"   \
+  -DANDROID_PLATFORM="$GRPC_ANDROID_PLATFORM"   \
+  -DProtobuf_DIR="$GRPC_INSTALL_DIR/lib/cmake/protobuf"   \
+  -DgRPC_DIR="$GRPC_INSTALL_DIR/lib/cmake/grpc"   \
+  -DHOST_PROTOC="$GRPC_HOST_INSTALL_DIR/bin/protoc"   \
+  -DHOST_GRPC_CPP_PLUGIN="$GRPC_HOST_INSTALL_DIR/bin/grpc_cpp_plugin"
+
+cmake --build build-android
+
 ------build with Android NDK------------------
