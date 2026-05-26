@@ -1,10 +1,6 @@
 #include "MediaController.h"
 #include "grpcstreamout/StreamoutGrpcClient.h"
 
-// Define the forward-declared type from MediaControllerInterface.h
-// so unique_ptr destructor can work. Real implementation lives in mk2 app.
-class MediaControllerPrivate {};
-
 static const char* statusToString(MediaController::StreamStatus s) {
     switch (s) {
         case MediaController::StreamStatus::Idle:      return "Idle";
@@ -39,19 +35,44 @@ static const char* errorToString(MediaController::StreamError e) {
     }
 }
 
-// Provide the singleton required by MediaControllerInterface.h
-MediaController& MediaController::getInstance() {
-    return MediaControllerImpl::getImplInstance();
-}
+// --- start of MediaController ---
+MediaController::MediaController()
+    : impl_(std::make_unique<MediaControllerImpl>()) {}
 
 MediaController::~MediaController() = default;
 
-// --- MediaControllerImpl ---
-
-MediaControllerImpl& MediaControllerImpl::getImplInstance() {
-    static MediaControllerImpl instance;
-    return instance;
+void MediaController::setGlobalCallbacks(const GlobalCallbacks& callbacks) {
+    impl_->setGlobalCallbacks(callbacks);
 }
+
+MediaController::StreamHandle MediaController::create(StreamType type) {
+    return impl_->create(type);
+}
+
+void MediaController::start(StreamHandle handle, const StreamConfiguration& configuration) {
+    impl_->start(handle, configuration);
+}
+
+void MediaController::stop(StreamHandle handle) {
+    impl_->stop(handle);
+}
+
+MediaController::StreamStatus MediaController::getStatus(StreamHandle handle) const {
+    return impl_->getStatus(handle);
+}
+
+MediaController::StreamError MediaController::getLastError(StreamHandle handle) const {
+    return impl_->getLastError(handle);
+}
+
+bool MediaController::isValidHandle(StreamHandle handle) const {
+    return impl_->isValidHandle(handle);
+}
+// --- end of MediaController ---
+
+
+
+// --- MediaControllerImpl ---
 
 void MediaControllerImpl::setGlobalCallbacks(const GlobalCallbacks& callbacks) {
     std::lock_guard<std::mutex> lock(mutex_);

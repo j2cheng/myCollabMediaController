@@ -76,6 +76,16 @@ static std::string GRPC_TARGET = "10.116.165.104:50052";
 // Default stream configuration for tests
 static const MediaController::StreamConfiguration DEFAULT_CONFIG = {"0.0.0.0", 8555, "RTSP"};
 
+// Helper: create a configured MediaControllerImpl for tests.
+static std::shared_ptr<MediaControllerImpl> makeController() {
+  auto controller = std::make_shared<MediaControllerImpl>();
+#ifdef USE_MOCK_GRPC_CLIENT
+  controller->setGrpcClient(std::make_unique<StreamoutGrpcClientMock>());
+  controller->setDeviceIdProvider(DeviceMock::getDeviceId);
+#endif
+  return controller;
+}
+
 // Fake service logic — tests SayHello without any gRPC dependency.
 class FakeIntStreamoutSvcStrl {
 public:
@@ -101,7 +111,30 @@ static void TestSayHelloNoServer() {
 }
 
 static void TestMediaController() {
-  auto& mc = MediaController::getInstance();
+  // Example: create controller directly (concrete implementation)
+  {
+    auto controller = std::make_shared<MediaController>();
+    auto& mc = *controller;
+    mc.setGlobalCallbacks({
+      .onStreamStatus = [](MediaController::StreamHandle handle,
+                           MediaController::StreamStatus status) {
+        std::cout << "  [direct] callback: handle=" << handle << " status=" << static_cast<int>(status) << std::endl;
+      },
+      .onStreamError = [](MediaController::StreamHandle handle,
+                          MediaController::StreamError error) {
+        std::cout << "  [direct] callback: handle=" << handle << " error=" << static_cast<int>(error) << std::endl;
+      },
+    });
+    auto handle = mc.create(MediaController::StreamType::StreamOut);
+    mc.start(handle, DEFAULT_CONFIG);
+
+    std::cout << "start() called, sleeping 4s..." << std::endl;
+    std::this_thread::sleep_for(std::chrono::seconds(4));
+
+    mc.stop(handle);
+  }
+  auto controller = makeController();
+  auto& mc = *controller;
 
   // Set up callbacks
   mc.setGlobalCallbacks({
@@ -131,7 +164,8 @@ static void TestMediaController() {
 }
 
 static void TestStreamOutCreateReturns() {
-  auto& mc = MediaController::getInstance();
+  auto controller = makeController();
+  auto& mc = *controller;
 
   const int count = 10;
   std::set<MediaController::StreamHandle> handles;
@@ -146,7 +180,8 @@ static void TestStreamOutCreateReturns() {
 }
 
 static void TestStartStopValidHandle() {
-  auto& mc = MediaController::getInstance();
+  auto controller = makeController();
+  auto& mc = *controller;
   auto h = mc.create(MediaController::StreamType::StreamOut);
   mc.start(h, DEFAULT_CONFIG);
   ASSERT_EQ(mc.getStatus(h), MediaController::StreamStatus::Created);
@@ -157,7 +192,8 @@ static void TestStartStopValidHandle() {
 }
 
 static void TestStartInvalidHandle() {
-  auto& mc = MediaController::getInstance();
+  auto controller = makeController();
+  auto& mc = *controller;
   MediaController::StreamHandle invalidHandle = 99999;
   bool errorCallbackFired = false;
 
@@ -175,7 +211,8 @@ static void TestStartInvalidHandle() {
 }
 
 static void TestStopInvalidHandle() {
-  auto& mc = MediaController::getInstance();
+  auto controller = makeController();
+  auto& mc = *controller;
   MediaController::StreamHandle invalidHandle = 99999;
 
   mc.stop(invalidHandle);
@@ -183,7 +220,8 @@ static void TestStopInvalidHandle() {
 }
 
 static void TestCreateInvalidStreamType() {
-  auto& mc = MediaController::getInstance();
+  auto controller = makeController();
+  auto& mc = *controller;
   bool errorCallbackFired = false;
 
   mc.setGlobalCallbacks({
@@ -207,14 +245,10 @@ int main(int argc, char* argv[]) {
   }
 
 #ifdef USE_MOCK_GRPC_CLIENT
-  // --- Test setup (uses impl details — mk2 app never does this) ---
-  auto& mcImpl = MediaControllerImpl::getImplInstance();
-  mcImpl.setGrpcClient(std::make_unique<StreamoutGrpcClientMock>());
-  mcImpl.setDeviceIdProvider(DeviceMock::getDeviceId);
+  // --- Test setup ---
+  // Each test creates its own MediaControllerImpl via makeController().
 #else
   // --- Reconnect test: simulate mk2 app (only uses MediaController interface) ---
-  // No setup needed — MediaControllerImpl self-initializes with default target.
-  // mk2 app just calls getInstance() and uses the interface.
 #endif
 
 #ifdef USE_MOCK_GRPC_CLIENT
@@ -238,11 +272,10 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== gRPC Reconnect Test ===" << std::endl;
     std::cout << "Trying initial create()..." << std::endl;
 
-    // Set the gRPC target before connecting
-    MediaControllerImpl::getImplInstance().setGrpcTarget(GRPC_TARGET);
-
-    // mk2 app code — only uses the interface:
-    auto& mc = MediaController::getInstance();
+    // mk2 app code:
+    auto controller = std::make_shared<MediaControllerImpl>();
+    controller->setGrpcTarget(GRPC_TARGET);
+    auto& mc = *controller;
 
     mc.setGlobalCallbacks({
       .onStreamStatus = [](MediaController::StreamHandle handle,
@@ -271,11 +304,10 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "Shutting down." << std::endl;
+
+    controller->deinit();
   }
 #endif
 
-  //Before exit or when MediaController is no longer needed:
-  MediaControllerImpl::getImplInstance().deinit();
-  
   return 0;
 }

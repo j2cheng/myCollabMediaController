@@ -6,7 +6,7 @@
 #include <cstdint>
 
 // Forward declaration
-class MediaControllerPrivate;
+class MediaControllerImpl;
 
 /**
  * MediaController
@@ -15,13 +15,15 @@ class MediaControllerPrivate;
  * Provides a bridge between the state machine and underlying media transport layers.
  * 
  * Typical usage:
- *   auto& controller = MediaController::getInstance();
- *   controller.setGlobalCallbacks(callbacks);
- *   auto handle = controller.create(StreamType::StreamOut, config);
- *   controller.start(handle);
+ *   auto controller = std::make_shared<MediaController>();
+ *   controller->setGlobalCallbacks(callbacks);
+ *   auto handle = controller->create(MediaController::StreamType::StreamOut);
+ *   controller->start(handle, config);
  *   // ... stream active ...
- *   controller.stop(handle);
+ *   controller->stop(handle);
  */
+
+
 class MediaController {
 public:
     // Stream type enumeration
@@ -76,23 +78,23 @@ public:
         std::function<void(StreamHandle handle, StreamError error)> onStreamError;
     };
 
-    // Singleton access
-    static MediaController& getInstance();
+    // Constructor - now public for instantiation
+    MediaController();
 
     // Destructor
     virtual ~MediaController();
 
-    // Prevent copying and moving
+    // Prevent copying but allow moving
     MediaController(const MediaController&) = delete;
     MediaController& operator=(const MediaController&) = delete;
-    MediaController(MediaController&&) = delete;
-    MediaController& operator=(MediaController&&) = delete;
+    MediaController(MediaController&&) = default;
+    MediaController& operator=(MediaController&&) = default;
 
     /**
      * Set global callbacks for all stream events.
      * @param callbacks Structure containing callback function pointers
      */
-    virtual void setGlobalCallbacks(const GlobalCallbacks& callbacks) = 0;
+    void setGlobalCallbacks(const GlobalCallbacks& callbacks);
 
     /**
      * Create a new stream handle and stream object.
@@ -100,7 +102,7 @@ public:
      * @return Valid StreamHandle on success, or invalid handle on failure
      * @note Call setLastError() on error; use getLastError() to inspect
      */
-    virtual StreamHandle create(StreamType type) = 0;
+    StreamHandle create(StreamType type) ;
 
     /**
      * Start a stream with given configuration.
@@ -109,7 +111,7 @@ public:
      * @note Updates StreamStatus via onStreamStatus callback on success
      * @note Updates StreamError via onStreamError callback on failure
      */
-    virtual void start(StreamHandle handle, const StreamConfiguration& configuration) = 0;
+    void start(StreamHandle handle, const StreamConfiguration& configuration);
 
     /**
      * Stop an active stream.
@@ -117,33 +119,29 @@ public:
      * @note Updates StreamStatus via onStreamStatus callback on completion
      * @note Safe to call on already-stopped streams (no-op)
      */
-    virtual void stop(StreamHandle handle) = 0;
+    void stop(StreamHandle handle) ;
 
     /**
      * Query current status of a stream.
      * @param handle Stream handle
      * @return Current StreamStatus
      */
-    virtual StreamStatus getStatus(StreamHandle handle) const = 0;
+    StreamStatus getStatus(StreamHandle handle) const ;
 
     /**
      * Query last error encountered for a stream.
      * @param handle Stream handle
      * @return StreamError code; NoError if no error occurred
      */
-    virtual StreamError getLastError(StreamHandle handle) const = 0;
+    StreamError getLastError(StreamHandle handle) const;
 
     /**
      * Check if a stream handle is valid.
      * @param handle Stream handle to validate
      * @return true if handle represents an active/valid stream
      */
-    virtual bool isValidHandle(StreamHandle handle) const = 0;
-
-protected:
-    // Protected constructor for singleton pattern and testing
-    MediaController() = default;
+    bool isValidHandle(StreamHandle handle) const;
 
 private:
-    std::unique_ptr<MediaControllerPrivate> impl_;
+    std::unique_ptr<MediaControllerImpl> impl_;
 };

@@ -100,3 +100,53 @@ auto-reconnect logs appear every 5 seconds. Press Enter to quit.
 
 During standalone development, `mock/` headers are included via the library's `PUBLIC` include paths.
 When integrated into the mk2 app build system, replace `mock/` with the real include paths.
+
+## Android Build
+
+Build the Android arm64-v8a static library:
+
+```bash
+./build_android64.sh
+```
+
+This sources `$HOME/shared/platforms/android/env.sh` (which pins NDK, gRPC, and toolchain versions) and produces `build-arm64/sources/libmediacontroller.a`.
+
+### Changing the NDK Version
+
+The NDK version is pinned via `ANDROID_NDK_VERSION` in `env.sh`. CMake reads `$ANDROID_NDK_HOME` (constructed from that version) — it does **not** auto-download NDKs.
+
+Because gRPC is consumed as a pre-built sysroot (`$GRPC_INSTALL_DIR`), it must be rebuilt against the new NDK whenever you change versions. Otherwise the host tools (`protoc`, `grpc_cpp_plugin`) in `$GRPC_HOST_INSTALL_DIR` are native Linux binaries and do not depend on the NDK.
+
+**Steps to switch NDK version:**
+
+1. **Install the new NDK** at `$ANDROID_HOME/ndk/<exact-version-string>/`:
+   ```bash
+   . $HOME/shared/platforms/android/env.sh
+   sdkmanager --install "ndk;<exact-version-string>"
+   ```
+
+2. **Update `env.sh`** — set `ANDROID_NDK_VERSION` to the exact version string (e.g. `28.0.13004108`).
+
+3. **Rebuild the Android-target gRPC sysroot** (host tools can stay):
+   ```bash
+   . $HOME/shared/platforms/android/env.sh
+   rm -rf "$GRPC_INSTALL_DIR"
+   $HOME/shared/platforms/android/scripts/build_grpc.sh
+   ```
+   The build script has an early-exit guard (`if [ -d $GRPC_INSTALL_DIR ]`) that skips when the install dir already exists, so you **must delete it first** to force a rebuild.
+
+4. **Rebuild your library:**
+   ```bash
+   ./build_android64.sh
+   ```
+
+5. **Regenerate the distribution package** (optional):
+   ```bash
+   ./dist_android64.sh
+   ```
+
+### Distribution Package
+
+`dist_android64.sh` collects `MediaControllerInterface.h`, the CMake metadata, and `libmediacontroller.a` into `collab_media_controller_dist/` and zips it to `collab_media_controller_dist.zip`.
+
+> Note: `zip` is not installed in the dev container — run `dist_android64.sh` on the host.
