@@ -71,12 +71,18 @@ static int g_tests_passed = 0;
 #endif
 
 // gRPC server target — override via command line: ./unit_test <host:port>
-static std::string GRPC_TARGET = "10.116.165.104:50052";
+static std::string GRPC_TARGET = "10.116.165.105:50052";
 
 // Default stream configuration for tests
 static const MediaController::StreamConfiguration DEFAULT_CONFIG = {"0.0.0.0", 8555, "RTSP"};
 
-// Helper: create a configured MediaControllerImpl for tests.
+// Helper: create a configured controller for tests.
+#ifdef TEST_GRPC_RECONNECT
+static std::shared_ptr<MediaController> makeController() {
+  auto controller = std::make_shared<MediaController>();
+  return controller;
+}
+#else
 static std::shared_ptr<MediaControllerImpl> makeController() {
   auto controller = std::make_shared<MediaControllerImpl>();
 #ifdef USE_MOCK_GRPC_CLIENT
@@ -85,6 +91,7 @@ static std::shared_ptr<MediaControllerImpl> makeController() {
 #endif
   return controller;
 }
+#endif
 
 // Fake service logic — tests SayHello without any gRPC dependency.
 class FakeIntStreamoutSvcStrl {
@@ -110,29 +117,30 @@ static void TestSayHelloNoServer() {
   ASSERT_EQ(reply.message(), "Hello Tester");
 }
 
+static void TestMediaControllerDirect() {
+  // Create controller directly (concrete implementation via interface)
+  auto controller = std::make_shared<MediaController>();
+  auto& mc = *controller;
+  mc.setGlobalCallbacks({
+    .onStreamStatus = [](MediaController::StreamHandle handle,
+                         MediaController::StreamStatus status) {
+      std::cout << "  [direct] callback: handle=" << handle << " status=" << static_cast<int>(status) << std::endl;
+    },
+    .onStreamError = [](MediaController::StreamHandle handle,
+                        MediaController::StreamError error) {
+      std::cout << "  [direct] callback: handle=" << handle << " error=" << static_cast<int>(error) << std::endl;
+    },
+  });
+  auto handle = mc.create(MediaController::StreamType::StreamOut);
+  mc.start(handle, DEFAULT_CONFIG);
+
+  std::cout << "start() called, sleeping 4s..." << std::endl;
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  mc.stop(handle);
+}
+
 static void TestMediaController() {
-  // Example: create controller directly (concrete implementation)
-  {
-    auto controller = std::make_shared<MediaController>();
-    auto& mc = *controller;
-    mc.setGlobalCallbacks({
-      .onStreamStatus = [](MediaController::StreamHandle handle,
-                           MediaController::StreamStatus status) {
-        std::cout << "  [direct] callback: handle=" << handle << " status=" << static_cast<int>(status) << std::endl;
-      },
-      .onStreamError = [](MediaController::StreamHandle handle,
-                          MediaController::StreamError error) {
-        std::cout << "  [direct] callback: handle=" << handle << " error=" << static_cast<int>(error) << std::endl;
-      },
-    });
-    auto handle = mc.create(MediaController::StreamType::StreamOut);
-    mc.start(handle, DEFAULT_CONFIG);
-
-    std::cout << "start() called, sleeping 4s..." << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(4));
-
-    mc.stop(handle);
-  }
   auto controller = makeController();
   auto& mc = *controller;
 
@@ -254,6 +262,7 @@ int main(int argc, char* argv[]) {
 #ifdef USE_MOCK_GRPC_CLIENT
 
   RUN_TEST(TestSayHelloNoServer);
+  RUN_TEST(TestMediaControllerDirect);
   RUN_TEST(TestMediaController);
   RUN_TEST(TestStreamOutCreateReturns);
   RUN_TEST(TestStartStopValidHandle);
