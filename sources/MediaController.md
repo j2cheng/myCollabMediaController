@@ -16,7 +16,6 @@
 | `deinit()` | Tears down all background threads, disconnects gRPC, clears streams. Safe to call multiple times. |
 
 Additionally:
-- `getInstance()` — static singleton accessor (delegates to `MediaControllerImpl::getImplInstance()`).
 - `statusToString()` — file-local helper that converts `StreamStatus` enum to a printable string.
 - `errorToString()` — file-local helper that converts `StreamError` enum to a printable string.
 - `ensureStreamoutConnected()` — lazy-init: creates gRPC client, connects, sets device ID, registers `WatchStatus` callback and opens the watch stream.
@@ -48,9 +47,9 @@ The mutex guards the shared mutable state — specifically `streams_`, `nextHand
 | `nextHandle_` | `StreamHandle` (int) | Monotonically increasing counter — guarantees unique handles. |
 | `callbacks_` | `GlobalCallbacks` | Stores `onStreamStatus` and `onStreamError` function objects. |
 
-### Singleton Pattern
+### Instantiation
 
-`MediaControllerImpl::getImplInstance()` uses a function-local `static` instance (thread-safe initialization guaranteed by C++11).
+`MediaControllerImpl` is a regular class — instantiate it directly (typically via `std::make_shared<MediaControllerImpl>()`). The application owns the lifetime; multiple instances are allowed.
 
 ## 3. Expected State Changes
 
@@ -101,7 +100,7 @@ The mutex guards the shared mutable state — specifically `streams_`, `nextHand
 └────────────────────────────────┬────────────────────────────────────────┘
                                  │
          ┌───────────────────────┼───────────────────────────┐
-         │ 1. getInstance()      │                           │
+         │ 1. std::make_shared<MediaControllerImpl>()        │
          │ 2. setGlobalCallbacks(onStreamStatus, onStreamError)
          │ 3. connect("host:port")                           │
          │ 4. create(StreamOut)  → returns handle            │
@@ -114,7 +113,7 @@ The mutex guards the shared mutable state — specifically `streams_`, `nextHand
 ┌────────────────────────────────┼────────────────────────────────────────┐
 │                     MediaController (This Module)                        │
 │                                │                                         │
-│  getInstance() ──► singleton created (no connection)                     │
+│  std::make_shared<MediaControllerImpl>() — instance created (no connection) │
 │                                │                                         │
 │  setGlobalCallbacks() ──► store onStreamStatus / onStreamError           │
 │                                │                                         │
@@ -233,18 +232,19 @@ connect() fails           watchStatusLoop() stream broken
 
 ### Shutdown / deinit()
 
-Since `MediaControllerImpl` is a singleton, its destructor may not run (or runs during static destruction when other objects are already destroyed). Use `deinit()` for explicit cleanup:
+Call `deinit()` for explicit cleanup before destroying the controller:
 
 ```cpp
-// Before app exit:
-MediaControllerImpl::getImplInstance().deinit();
+auto controller = std::make_shared<MediaControllerImpl>();
+// ... use it ...
+controller->deinit();
 ```
 
 **What it does:**
 1. Calls `grpcClient_->disconnect()` — which stops state watcher, reconnect loop, cancels active streaming RPC, and joins all background threads.
 2. Clears the `streams_` map and resets `nextHandle_` and `deviceId_`.
 
-**After `deinit()`:** The singleton is still alive. Calling `create()` again will trigger `ensureStreamoutConnected()` and reconnect cleanly (full lifecycle restart).
+**After `deinit()`:** The instance is still alive. Calling `create()` again will trigger `ensureStreamoutConnected()` and reconnect cleanly (full lifecycle restart).
 
 **Safe to call:** Multiple times, from any thread. The gRPC client's `disconnect()` is idempotent.
 

@@ -7,18 +7,26 @@
 #include <mutex>
 #include <iostream>
 
-class MediaControllerImpl : public MediaController {
+class MediaControllerImpl  {
 public:
-    static MediaControllerImpl& getImplInstance();
-    ~MediaControllerImpl() override = default;
+    // --- Type aliases for MediaController types ---
+    using StreamType = MediaController::StreamType;
+    using StreamStatus = MediaController::StreamStatus;
+    using StreamError = MediaController::StreamError;
+    using StreamHandle = MediaController::StreamHandle;
+    using StreamConfiguration = MediaController::StreamConfiguration;
+    using GlobalCallbacks = MediaController::GlobalCallbacks;
 
-    void setGlobalCallbacks(const GlobalCallbacks& callbacks) override;
-    StreamHandle create(StreamType type) override;
-    void start(StreamHandle handle, const StreamConfiguration& configuration) override;
-    void stop(StreamHandle handle) override;
-    StreamStatus getStatus(StreamHandle handle) const override;
-    StreamError getLastError(StreamHandle handle) const override;
-    bool isValidHandle(StreamHandle handle) const override;
+    MediaControllerImpl() = default;
+    ~MediaControllerImpl() { deinit(); }
+
+    void setGlobalCallbacks(const GlobalCallbacks& callbacks);
+    StreamHandle create(StreamType type);
+    void start(StreamHandle handle, const StreamConfiguration& configuration);
+    void stop(StreamHandle handle);
+    StreamStatus getStatus(StreamHandle handle) const;
+    StreamError getLastError(StreamHandle handle) const;
+    bool isValidHandle(StreamHandle handle) const;
 
     // gRPC client injection (for testing vs production)
     void setGrpcClient(std::unique_ptr<StreamoutGrpcClientInterface> client);
@@ -26,16 +34,9 @@ public:
     void setDeviceId(uint32_t id);
     void setDeviceIdProvider(std::function<uint32_t()> provider);
 
-    /**
-     * Tear down all background threads and release resources.
-     * Call this before app exit (singleton destructor may not run reliably).
-     * Safe to call multiple times. After deinit(), create() will reconnect.
-     */
     void deinit();
 
 private:
-    MediaControllerImpl() = default;
-
     struct StreamInfo {
         StreamType type;
         StreamStatus status = StreamStatus::Idle;
@@ -50,10 +51,8 @@ private:
     StreamHandle nextHandle_ = 1;
     mutable std::mutex mutex_;
 
-    // grpcClient_ pointer read under mutex_ (in create/deinit). Only call setGrpcClient() during init.
-    // If not set externally, ensureStreamoutConnected() creates one automatically.
     std::unique_ptr<StreamoutGrpcClientInterface> grpcClient_;
-    std::string grpcTarget_ = "127.0.0.1:50051";  // default target; override with setGrpcTarget()
-    uint32_t deviceId_ = 0xFF00;  // default device ID; override with setDeviceId() or setDeviceIdProvider()
+    std::string grpcTarget_ = "127.0.0.1:50051";
+    uint32_t deviceId_ = 0xFF00;
     std::function<uint32_t()> deviceIdProvider_;
 };

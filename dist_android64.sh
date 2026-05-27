@@ -9,8 +9,9 @@ DIST_INCLUDE="${DIST_DIR}/include"
 DIST_CMAKE="${DIST_DIR}/lib/cmake"
 DIST_LIB="${DIST_DIR}/android/arm64-v8a/lib/Release"
 
-# 1. Create folder structure
+# 1. Create folder structure (clean first to remove any stale files)
 echo "Creating directory structure..."
+rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_INCLUDE}"
 mkdir -p "${DIST_CMAKE}"
 mkdir -p "${DIST_LIB}"
