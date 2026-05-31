@@ -1,0 +1,9 @@
+build/
+build-arm64/
+build-android/
+collab_media_controller_dist/
+collab_media_controller_dist.zip
+.git/
+.github/
+.vscode/
+*.zip
