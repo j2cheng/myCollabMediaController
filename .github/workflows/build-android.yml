@@ -34,7 +34,7 @@ jobs:
             -v "$PWD":/work \
             -w /work \
             collab-media-controller-build:latest \
-            bash -lc './build_android64.sh'
+            bash -lc 'bash build_android64.sh'
 
       - name: Package distribution
         run: |
@@ -42,7 +42,7 @@ jobs:
             -v "$PWD":/work \
             -w /work \
             collab-media-controller-build:latest \
-            bash -lc './dist_android64.sh'
+            bash -lc 'bash dist_android64.sh'
 
       - name: Upload distribution zip
         uses: actions/upload-artifact@v4
