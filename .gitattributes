@@ -1,0 +1,12 @@
+# Force LF line endings — required for shell scripts and Dockerfiles
+# that are executed inside Linux containers. CRLF causes "command not found"
+# and corrupts ARG/ENV values (trailing \r ends up inside paths).
+* text=auto eol=lf
+
+*.sh           text eol=lf
+Dockerfile     text eol=lf
+*.dockerfile   text eol=lf
+*.yml          text eol=lf
+*.yaml         text eol=lf
+*.cmake        text eol=lf
+CMakeLists.txt text eol=lf
