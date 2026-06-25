@@ -1,40 +1,7 @@
 #include "StreamoutGrpcClient.h"
 
-#ifdef USE_FOUNDATION
-#include "Logging/Log.hpp"
-#include <atomic>
-
-using Foundation::Log;
-
-static Log::Category logCategory;
-static std::atomic<bool> logInitialized{false};
-
-static void initLogging() {
-    if (!logInitialized.exchange(true)) {
-        logCategory = Log::GetInstance().AddCategory("StreamoutGrpcClient");
-    }
-}
-#else
-#include <cstdarg>
-#include <cstdio>
-#include <iostream>
-
-namespace {
-inline void sgcLog(std::ostream& os, const char* level, const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    char buf[1024];
-    std::vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-    os << "[" << level << "] [StreamoutGrpcClient] " << buf << std::endl;
-}
-inline void initLogging() {}
-} // namespace
-
-#define LogInfo(cat, ...)    ::sgcLog(std::cout, "INFO",  __VA_ARGS__)
-#define LogWarning(cat, ...) ::sgcLog(std::cout, "WARN",  __VA_ARGS__)
-#define LogError(cat, ...)   ::sgcLog(std::cerr, "ERROR", __VA_ARGS__)
-#endif
+#define LOG_TAG "StreamoutGrpcClient"
+#include "Logging.h"
 
 StreamoutGrpcClient::~StreamoutGrpcClient() {
     disconnect();

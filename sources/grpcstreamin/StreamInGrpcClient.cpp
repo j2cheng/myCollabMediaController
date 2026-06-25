@@ -1,40 +1,7 @@
 #include "StreamInGrpcClient.h"
 
-#ifdef USE_FOUNDATION
-#include "Logging/Log.hpp"
-#include <atomic>
-
-using Foundation::Log;
-
-static Log::Category logCategory;
-static std::atomic<bool> logInitialized{false};
-
-static void initLogging() {
-    if (!logInitialized.exchange(true)) {
-        logCategory = Log::GetInstance().AddCategory("StreamInGrpcClient");
-    }
-}
-#else
-#include <cstdarg>
-#include <cstdio>
-#include <iostream>
-
-namespace {
-inline void sicLog(std::ostream& os, const char* level, const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    char buf[1024];
-    std::vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-    os << "[" << level << "] [StreamInGrpcClient] " << buf << std::endl;
-}
-inline void initLogging() {}
-} // namespace
-
-#define LogInfo(cat, ...)    ::sicLog(std::cout, "INFO",  __VA_ARGS__)
-#define LogWarning(cat, ...) ::sicLog(std::cout, "WARN",  __VA_ARGS__)
-#define LogError(cat, ...)   ::sicLog(std::cerr, "ERROR", __VA_ARGS__)
-#endif
+#define LOG_TAG "StreamInGrpcClient"
+#include "Logging.h"
 
 #include <chrono>
 

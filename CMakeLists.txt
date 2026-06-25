@@ -36,22 +36,28 @@ else()
     message(STATUS "=== Building for LINUX ===")
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find protobuf and gRPC once at the top level
 if(ANDROID)
     find_package(protobuf CONFIG REQUIRED)
-    # OpenSSL temporarily disabled - not needed for current Android build.
-    # include(${CMAKE_CURRENT_LIST_DIR}/../android_openssl/android_openssl.cmake)
+    if(USE_FOUNDATION)
+        # Provide OpenSSL::SSL and OpenSSL::Crypto from prebuilt Android artifacts.
+        include(${CMAKE_CURRENT_LIST_DIR}/../android_openssl/android_openssl.cmake)
+    endif()
 else()
     # For Linux, use CONFIG mode to ensure we use gRPC-provided protobuf cmake files
-    find_package(protobuf CONFIG QUIET)
-    if(NOT protobuf_FOUND)
-        find_package(Protobuf REQUIRED)
+    if(USE_FOUNDATION)
+        find_package(protobuf CONFIG REQUIRED)
+    else()
+        find_package(protobuf CONFIG QUIET)
+        if(NOT protobuf_FOUND)
+            find_package(Protobuf REQUIRED)
+        endif()
     endif()
     # Find OpenSSL before gRPC (gRPC depends on it).
-    #find_package(OpenSSL REQUIRED)
+    find_package(OpenSSL REQUIRED)
 endif()
 
 find_package(gRPC CONFIG REQUIRED)

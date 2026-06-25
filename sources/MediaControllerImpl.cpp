@@ -2,41 +2,8 @@
 #include "grpcstreamout/StreamoutGrpcClient.h"
 #include "grpcstreamin/StreamInGrpcClient.h"
 
-#ifdef USE_FOUNDATION
-#include "Logging/Log.hpp"
-#include <atomic>
-
-using Foundation::Log;
-
-static Log::Category logCategory;
-static std::atomic<bool> logInitialized{false};
-
-static void initLogging() {
-    if (!logInitialized.exchange(true)) {
-        logCategory = Log::GetInstance().AddCategory("MediaController");
-    }
-}
-#else
-#include <cstdarg>
-#include <cstdio>
-#include <iostream>
-
-namespace {
-inline void mcLog(std::ostream& os, const char* level, const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    char buf[1024];
-    std::vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-    os << "[" << level << "] [MediaController] " << buf << std::endl;
-}
-inline void initLogging() {}
-} // namespace
-
-#define LogInfo(cat, ...)    ::mcLog(std::cout, "INFO",  __VA_ARGS__)
-#define LogWarning(cat, ...) ::mcLog(std::cout, "WARN",  __VA_ARGS__)
-#define LogError(cat, ...)   ::mcLog(std::cerr, "ERROR", __VA_ARGS__)
-#endif
+#define LOG_TAG "MediaController"
+#include "Logging.h"
 
 static const char* statusToString(MediaController::StreamStatus s) {
     switch (s) {
