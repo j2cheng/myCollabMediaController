@@ -71,6 +71,7 @@ static int g_tests_passed = 0;
 
 #ifdef USE_MOCK_GRPC_CLIENT
 #include "StreamoutGrpcClientMock.h"
+#include "StreamInGrpcClientMock.h"
 #endif
 
 // gRPC server target — override via command line: ./unit_test <host:port>
@@ -90,6 +91,7 @@ static std::shared_ptr<MediaControllerImpl> makeController() {
   auto controller = std::make_shared<MediaControllerImpl>();
 #ifdef USE_MOCK_GRPC_CLIENT
   controller->setGrpcClient(std::make_unique<StreamoutGrpcClientMock>());
+  controller->setStreamInGrpcClient(std::make_unique<StreamInGrpcClientMock>());
   controller->setDeviceIdProvider(DeviceMock::getDeviceId);
 #endif
   return controller;
@@ -178,16 +180,65 @@ static void TestStreamOutCreateReturns() {
   auto controller = makeController();
   auto& mc = *controller;
 
-  const int count = 10;
-  std::set<MediaController::StreamHandle> handles;
+  // Only one handle per type is allowed. The first create() succeeds;
+  // every subsequent create() of the same type must be rejected with
+  // ResourceExhausted and return -1.
+  MediaController::StreamError lastError = MediaController::StreamError::NoError;
+  int errorCallbackCount = 0;
+  mc.setGlobalCallbacks({
+    .onStreamStatus = nullptr,
+    .onStreamError = [&](MediaController::StreamHandle /*h*/, MediaController::StreamError error) {
+      lastError = error;
+      ++errorCallbackCount;
+    },
+  });
 
-  for (int i = 0; i < count; ++i) {
+  auto first = mc.create(MediaController::StreamType::StreamOut);
+  ASSERT_TRUE(mc.isValidHandle(first));
+  ASSERT_EQ(errorCallbackCount, 0);
+
+  for (int i = 0; i < 5; ++i) {
     auto h = mc.create(MediaController::StreamType::StreamOut);
-    ASSERT_TRUE(handles.find(h) == handles.end());
-    handles.insert(h);
+    ASSERT_EQ(h, MediaController::StreamHandle{-1});
+    ASSERT_EQ(lastError, MediaController::StreamError::ResourceExhausted);
   }
+  ASSERT_EQ(errorCallbackCount, 5);
+}
 
-  ASSERT_EQ(static_cast<int>(handles.size()), count);
+static void TestStreamInCreateStartStop() {
+  auto controller = makeController();
+  auto& mc = *controller;
+
+  int statusCount = 0;
+  MediaController::StreamStatus lastStatus = MediaController::StreamStatus::Idle;
+  mc.setGlobalCallbacks({
+    .onStreamStatus = [&](MediaController::StreamHandle /*h*/, MediaController::StreamStatus s) {
+      lastStatus = s;
+      ++statusCount;
+    },
+    .onStreamError = nullptr,
+  });
+
+  // create()
+  auto h = mc.create(MediaController::StreamType::StreamIn);
+  ASSERT_TRUE(mc.isValidHandle(h));
+  ASSERT_EQ(mc.getStatus(h), MediaController::StreamStatus::Created);
+  ASSERT_EQ(lastStatus, MediaController::StreamStatus::Created);
+  ASSERT_EQ(statusCount, 1);
+
+  // Second create(StreamIn) must be rejected (one-handle-per-type rule).
+  auto dup = mc.create(MediaController::StreamType::StreamIn);
+  ASSERT_EQ(dup, MediaController::StreamHandle{-1});
+
+  // start()
+  const MediaController::StreamConfiguration cfg{"192.168.1.10", 8554, "RTSP"};
+  mc.start(h, cfg);
+  ASSERT_EQ(mc.getLastError(h), MediaController::StreamError::NoError);
+
+  // stop()
+  mc.stop(h);
+  ASSERT_EQ(mc.getStatus(h), MediaController::StreamStatus::Stopping);
+  ASSERT_EQ(lastStatus, MediaController::StreamStatus::Stopping);
 }
 
 static void TestStartStopValidHandle() {
@@ -268,6 +319,7 @@ int main(int argc, char* argv[]) {
   RUN_TEST(TestMediaControllerDirect);
   RUN_TEST(TestMediaController);
   RUN_TEST(TestStreamOutCreateReturns);
+  RUN_TEST(TestStreamInCreateStartStop);
   RUN_TEST(TestStartStopValidHandle);
   RUN_TEST(TestStartInvalidHandle);
   RUN_TEST(TestStopInvalidHandle);

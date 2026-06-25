@@ -27,15 +27,18 @@
 #ifdef USE_FOUNDATION
 
 #include "Logging/Log.hpp"
-#include <atomic>
+#include <mutex>
 
 namespace {
 ::Foundation::Log::Category logCategory;
-::std::atomic<bool> logInitialized{false};
+::std::once_flag logInitOnce;
 inline void initLogging() {
-    if (!logInitialized.exchange(true)) {
+    // call_once guarantees that other threads block until the first thread
+    // finishes AddCategory(); without this they could observe logCategory
+    // in its default-constructed state.
+    std::call_once(logInitOnce, []() {
         logCategory = ::Foundation::Log::GetInstance().AddCategory(LOG_TAG);
-    }
+    });
 }
 } // namespace
 

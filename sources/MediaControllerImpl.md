@@ -6,7 +6,7 @@
 
 | Function | Description |
 |----------|-------------|
-| `create(StreamType type)` | Allocates a unique `StreamHandle`, inserts a new `StreamInfo` entry with status `Created`, and fires `onStreamStatus` callback. |
+| `create(StreamType type)` | Allocates a unique `StreamHandle`, inserts a new `StreamInfo` entry with status `Created`, and fires `onStreamStatus` callback. Lazy-initialises and connects the gRPC client for `type` if needed; the slow `connect()` runs **outside** `mutex_` so other API calls aren't blocked during the up-to-3s `WaitForConnected`. |
 | `start(StreamHandle, StreamConfiguration)` | Validates the handle, stores the configuration, and forwards the start command to the gRPC streamout server. Does **not** change status — status updates come from the lower layer. |
 | `stop(StreamHandle)` | Validates the handle, transitions status to `Stopping`, sends `StreamoutStop` via gRPC, and fires `onStreamStatus(Stopping)` callback. Final `Stopped` status arrives asynchronously via `WatchStatus` stream. No-op for invalid or already-stopped handles. |
 | `getStatus(StreamHandle)` | Returns current `StreamStatus` for a handle, or `Idle` if the handle doesn't exist. |
@@ -85,12 +85,14 @@ The mutex guards the shared mutable state — specifically `streams_`, `nextHand
 | Error | Triggered When |
 |-------|----------------|
 | `InvalidHandle` | `start()` called with a handle not in `streams_` map. |
-| `AlreadyStarted` | `start()` called on a handle already in `Active` status. |
 | `InvalidStreamType` | `create()` called with an unknown `StreamType`. |
+| `ResourceExhausted` | `create()` called with a `StreamType` for which a handle already exists. See § "One-handle-per-type limitation". |
 | `NetworkError` | `create()` failed — gRPC server unreachable. |
 | `StartupFailed` | `start()` — `setPort()` or `startStream()` RPC failed. |
 | `StopFailed` | `stop()` — `stopStream()` RPC failed. |
 | `NoError` | Default — no error has occurred for this handle. |
+
+**Note:** `start()` and `stop()` are pass-through with respect to status — they do **not** reject calls based on the current `StreamStatus`. The lower-layer gRPC server owns the state machine; the controller simply forwards the call. `AlreadyStarted` is therefore never raised by this implementation.
 
 ## 5. Workflow Diagram
 
@@ -506,4 +508,47 @@ The server currently sends incorrect `StreamStatus` enum values:
 | `status_code=2` (CLIENT_CONNECTED) | Active | "Stream is not running returning NULL...." (actually stopped) |
 
 Client-side mapping in the status callback needs to be updated to match the server's actual behavior. Server fix is preferred but not currently possible.
+
+## 9. One-handle-per-type limitation
+
+### Current structure
+
+`MediaControllerImpl` owns **one** gRPC client per stream type:
+
+| Member | Type | Connects to | Started by |
+|---|---|---|---|
+| `grpcClient_` | `StreamoutGrpcClientInterface` | `grpcTarget_` (default `127.0.0.1:50051`) | `ensureStreamoutConnected()` |
+| `streamInGrpcClient_` | `StreamInGrpcClientInterface` | `streamInGrpcTarget_` (default `127.0.0.1:50052`) | `ensureStreamInConnected()` |
+
+Both clients are created lazily on the first `create()` of their type and reused for every subsequent operation. A single `WatchStatus` server-streaming RPC runs against the streamout server; there is no equivalent for streamin (the controller polls via the unary `status()` RPC in `getStatus()`).
+
+The lower-layer wire protocol does **not** distinguish between concurrent streams of the same type:
+
+- `StreamoutStart` is always sent with `arg=0` and `StreamoutWatchStatus` always reports `stream_id=0` ("all").
+- `RTSPClientService.startStream` operates on a single implicit stream per server.
+
+Because of this, two `create(StreamOut)` calls on the same controller would map to the same physical server-side stream, and a single status update would (falsely) appear to apply to both handles. To avoid silently aliasing, `create()` rejects the second call of an existing type with `StreamError::ResourceExhausted`.
+
+```
+create(StreamOut) → handle=1 (Created)
+create(StreamOut) → -1, onStreamError(0, ResourceExhausted)   // rejected
+create(StreamIn)  → handle=2 (Created)                         // OK, different type
+create(StreamIn)  → -1, onStreamError(0, ResourceExhausted)   // rejected
+```
+
+### Supporting multiple connections of the same type
+
+To lift the limitation, the following are required:
+
+1. **Per-stream wire identity.** The lower-layer servers must accept and echo back a per-stream identifier:
+   - Streamout: `StreamoutStart`, `StreamoutStop`, and the `WatchStatus` response must carry a `stream_id` that uniquely identifies one of the N concurrent streams the server manages. Today, `stream_id=0` means "all" — this needs to become a real index.
+   - Streamin: equivalent — either a per-stream id in the unary RPCs, or a server-streaming `WatchStatus` analogue that emits per-stream events.
+2. **Distinct server endpoints (if the server can only host one stream per process).** If the server is single-stream by design (e.g., binds one RTSP/RTP listener per process), the controller would need to know **which port each additional server is reachable on**. There is no such discovery mechanism today — `grpcTarget_` and `streamInGrpcTarget_` are single fixed strings. Options for the future:
+   - A config-time list of targets per type (e.g. `setStreamoutGrpcTargets({"127.0.0.1:50051", "127.0.0.1:50053"})`).
+   - A directory/lookup RPC against the lower layer to enumerate available ports.
+   - A target argument passed at `create()` time.
+3. **Per-handle client lifecycle in `MediaControllerImpl`.** Replace the single `grpcClient_` / `streamInGrpcClient_` members with a map of `StreamHandle → client`, create a client per handle in `start()` (or `create()`), and capture the handle in each per-client status callback so routing is automatic without searching.
+4. **Adjust `create()`'s duplicate-type check.** Once (1)–(3) are in place, remove the `duplicateType` rejection (or relax it to a per-target check).
+
+Until these are in place, the controller stays single-handle-per-type and any caller that needs more should instantiate additional `MediaController` instances pointing at distinct server endpoints.
 

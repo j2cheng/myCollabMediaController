@@ -93,8 +93,18 @@ void MediaControllerImpl::setGlobalCallbacks(const GlobalCallbacks& callbacks) {
 }
 
 void MediaControllerImpl::setGrpcClient(std::unique_ptr<StreamoutGrpcClientInterface> client) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    grpcClient_ = std::move(client);
+    // Take ownership of the existing client under the lock, swap, then let the
+    // old one destruct OUTSIDE the lock. The old client's destructor calls
+    // disconnect(), which joins watchThread_; that thread's status callback
+    // re-enters MediaControllerImpl and tries to take mutex_ — destructing
+    // under the lock would deadlock.
+    std::shared_ptr<StreamoutGrpcClientInterface> old;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        old = std::move(grpcClient_);
+        grpcClient_ = std::move(client);
+    }
+    // `old` releases its ref here; if it was the last, dtor runs outside the lock.
 }
 
 void MediaControllerImpl::setGrpcTarget(const std::string& target) {
@@ -103,8 +113,13 @@ void MediaControllerImpl::setGrpcTarget(const std::string& target) {
 }
 
 void MediaControllerImpl::setStreamInGrpcClient(std::unique_ptr<StreamInGrpcClientInterface> client) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    streamInGrpcClient_ = std::move(client);
+    // Same rationale as setGrpcClient: destruct the old client outside the lock.
+    std::shared_ptr<StreamInGrpcClientInterface> old;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        old = std::move(streamInGrpcClient_);
+        streamInGrpcClient_ = std::move(client);
+    }
 }
 
 void MediaControllerImpl::setStreamInGrpcTarget(const std::string& target) {
@@ -123,16 +138,25 @@ void MediaControllerImpl::setDeviceIdProvider(std::function<uint32_t()> provider
 }
 
 void MediaControllerImpl::deinit() {
-    // Disconnect gRPC client — stops reconnect thread, state watcher, watch stream
-    // Take grpcClient_ pointer under lock, then call disconnect() outside
-    // (disconnect() may block on thread joins; we don't want to hold mutex_ during that)
-    StreamoutGrpcClientInterface* client = nullptr;
+    // Disconnect both gRPC clients — stops reconnect thread, state watcher,
+    // watch stream (StreamOut) and any in-flight RPCs (StreamIn).
+    // Copy both shared_ptrs under lock, then call disconnect() OUTSIDE the lock
+    // (disconnect() may block on thread joins; we don't want to hold mutex_
+    // during that, and a watch-thread callback re-acquires mutex_).
+    // Holding a shared_ptr copy also keeps each client alive for the duration
+    // of its disconnect() call regardless of what other threads do.
+    std::shared_ptr<StreamoutGrpcClientInterface> outClient;
+    std::shared_ptr<StreamInGrpcClientInterface>  inClient;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        client = grpcClient_.get();
+        outClient = grpcClient_;
+        inClient  = streamInGrpcClient_;
     }
-    if (client) {
-        client->disconnect();
+    if (outClient) {
+        outClient->disconnect();
+    }
+    if (inClient) {
+        inClient->disconnect();
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -142,149 +166,181 @@ void MediaControllerImpl::deinit() {
     LogInfo(logCategory, "deinit complete");
 }
 
-bool MediaControllerImpl::ensureStreamoutConnected() {
-    // Lazy-init: create gRPC client if not injected externally
-    if (!grpcClient_) {
-        // Include here to avoid header dependency in MediaControllerImpl.h
-        // (StreamoutGrpcClient.h pulls in grpc++ headers)
-        grpcClient_ = std::make_unique<StreamoutGrpcClient>();
-    }
-    if (grpcClient_->isConnected()) {
-        return true;
-    }
-    if (!grpcClient_->connect(grpcTarget_)) {
-        LogError(logCategory, "gRPC streamout connect failed");
-        return false;
-    }
-    // Send device ID immediately after connecting
-    uint32_t id = deviceId_;
-    if (id == 0 && deviceIdProvider_) {
-        id = deviceIdProvider_();
-        deviceId_ = id;
-    }
-    if (id != 0) {
-        grpcClient_->setProductId(id);
-    }
-
-    // Register status callback to receive StreamoutStatusResponse from server
-    grpcClient_->setStatusCallback(
-        [this](int32_t streamId, int32_t statusCode, const std::string& statusInfo) {
-            LogInfo(logCategory, "WatchStatus: stream_id=%d status_code=%d status_info=\"%s\"",
-                    streamId, statusCode, statusInfo.c_str());
-
-            GlobalCallbacks cb;
-            std::vector<std::pair<StreamHandle, StreamStatus>> notifications;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                // Map gRPC StreamStatus to MediaController::StreamStatus
-                StreamStatus newStatus = StreamStatus::Idle;
-                switch (statusCode) {
-                    case 1: newStatus = StreamStatus::Listening; break;  // STREAM_STATUS_READY
-                    case 2: newStatus = StreamStatus::Active;    break;  // STREAM_STATUS_CLIENT_CONNECTED
-                    case 3: newStatus = StreamStatus::Stopped;   break;  // STREAM_STATUS_STOPPED
-                    default: newStatus = StreamStatus::Error;    break;
-                }
-
-                // Update all matching streams (streamId 0 = all)
-                for (auto& [handle, info] : streams_) {
-                    info.status = newStatus;
-                    notifications.emplace_back(handle, newStatus);
-                }
-                cb = callbacks_;
-            }
-
-            // Fire callbacks outside lock to prevent deadlock if callback re-enters
-            if (cb.onStreamStatus) {
-                for (auto& [handle, status] : notifications) {
-                    cb.onStreamStatus(handle, status);
-                }
-            }
-        });
-
-    // Start the WatchStatus stream at connection time so we never miss status updates
-    grpcClient_->startWatching();
-
-    return true;
-}
-
-bool MediaControllerImpl::ensureStreamInConnected() {
-    // Lazy-init: create gRPC client if not injected externally
-    if (!streamInGrpcClient_) {
-        // Include here to avoid header dependency in MediaControllerImpl.h
-        streamInGrpcClient_ = std::make_unique<StreamInGrpcClient>();
-    }
-    if (streamInGrpcClient_->isConnected()) {
-        return true;
-    }
-    if (!streamInGrpcClient_->connect(streamInGrpcTarget_)) {
-        LogError(logCategory, "gRPC streamin connect failed (target=%s)", streamInGrpcTarget_.c_str());
-        return false;
-    }
-    LogInfo(logCategory, "gRPC streamin connected (target=%s)", streamInGrpcTarget_.c_str());
-    return true;
-}
-
 MediaController::StreamHandle MediaControllerImpl::create(StreamType type) {
     GlobalCallbacks cb;
-    StreamHandle handle = -1;
-    bool connectFailed = false;
-    bool invalidType = false;
+    bool invalidType   = false;
+    bool duplicateType = false;
 
+    // --- Phase 1: short critical section --- validate, dedupe, snapshot inputs.
+    std::string                                   targetSnap;
+    uint32_t                                      deviceIdSnap = 0;
+    std::function<uint32_t()>                     deviceIdProviderSnap;
+    std::shared_ptr<StreamoutGrpcClientInterface> existingOut;
+    std::shared_ptr<StreamInGrpcClientInterface>  existingIn;
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        // Validate stream type
         if (type != StreamType::StreamOut && type != StreamType::StreamIn) {
             invalidType = true;
             cb = callbacks_;
         }
 
-        // Connect to the appropriate gRPC server based on stream type
-        if (!invalidType && type == StreamType::StreamOut) {
-            if (!ensureStreamoutConnected()) {
-                connectFailed = true;
-                cb = callbacks_;
-            }
-        } else if (!invalidType && type == StreamType::StreamIn) {
-            if (!ensureStreamInConnected()) {
-                connectFailed = true;
-                cb = callbacks_;
+        // Only one handle per type is supported today — the lower-layer
+        // gRPC server does not distinguish between concurrent streams of the
+        // same type. See MediaControllerImpl.md § "One-handle-per-type
+        // limitation".
+        if (!invalidType) {
+            for (const auto& kv : streams_) {
+                if (kv.second.type == type) {
+                    duplicateType = true;
+                    cb = callbacks_;
+                    LogWarning(logCategory,
+                               "create(%s) rejected: a handle of this type "
+                               "already exists (handle=%d)",
+                               type == StreamType::StreamOut ? "StreamOut" : "StreamIn",
+                               kv.first);
+                    break;
+                }
             }
         }
 
-        if (!connectFailed) {
-            handle = nextHandle_++;
-            streams_[handle] = {type, StreamStatus::Created, StreamError::NoError, {}};
-            LogInfo(logCategory, "created handle=%d type=%s status=Created",
-                    handle, type == StreamType::StreamOut ? "StreamOut" : "StreamIn");
+        if (!invalidType && !duplicateType) {
+            if (type == StreamType::StreamOut) {
+                targetSnap  = grpcTarget_;
+                existingOut = grpcClient_;
+            } else {
+                targetSnap = streamInGrpcTarget_;
+                existingIn = streamInGrpcClient_;
+            }
+            deviceIdSnap         = deviceId_;
+            deviceIdProviderSnap = deviceIdProvider_;
+        }
+    }
+
+    if (invalidType) {
+        if (cb.onStreamError) cb.onStreamError(0, StreamError::InvalidStreamType);
+        return -1;
+    }
+    if (duplicateType) {
+        if (cb.onStreamError) cb.onStreamError(0, StreamError::ResourceExhausted);
+        return -1;
+    }
+
+    // --- Phase 2: OUTSIDE the lock --- slow connect / configuration.
+    // We work on a local shared_ptr only; nothing on `this` is touched.
+    std::shared_ptr<StreamoutGrpcClientInterface> newOut;
+    std::shared_ptr<StreamInGrpcClientInterface>  newIn;
+    bool connectFailed = false;
+
+    if (type == StreamType::StreamOut) {
+        auto out = existingOut ? existingOut
+                                : std::shared_ptr<StreamoutGrpcClientInterface>(
+                                      std::make_shared<StreamoutGrpcClient>());
+        if (!out->isConnected()) {
+            if (!out->connect(targetSnap)) {
+                LogError(logCategory, "gRPC streamout connect failed");
+                connectFailed = true;
+            } else {
+                uint32_t id = deviceIdSnap;
+                if (id == 0 && deviceIdProviderSnap) id = deviceIdProviderSnap();
+                if (id != 0) out->setProductId(id);
+
+                // Register status callback to receive StreamoutStatusResponse from server
+                out->setStatusCallback(
+                    [this](int32_t streamId, int32_t statusCode, const std::string& statusInfo) {
+                        LogInfo(logCategory, "WatchStatus: stream_id=%d status_code=%d status_info=\"%s\"",
+                                streamId, statusCode, statusInfo.c_str());
+
+                        GlobalCallbacks innerCb;
+                        std::vector<std::pair<StreamHandle, StreamStatus>> notifications;
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            // Map gRPC StreamStatus to MediaController::StreamStatus
+                            StreamStatus newStatus = StreamStatus::Idle;
+                            switch (statusCode) {
+                                case 1: newStatus = StreamStatus::Listening; break;  // STREAM_STATUS_READY
+                                case 2: newStatus = StreamStatus::Active;    break;  // STREAM_STATUS_CLIENT_CONNECTED
+                                case 3: newStatus = StreamStatus::Stopped;   break;  // STREAM_STATUS_STOPPED
+                                default: newStatus = StreamStatus::Error;    break;
+                            }
+
+                            // This callback is registered only on the StreamOut
+                            // gRPC client, so its status updates are only
+                            // meaningful for StreamOut handles. Skip StreamIn
+                            // entries so they aren't clobbered.
+                            // (streamId is always 0 today, i.e. "all" — once
+                            // the lower layer routes per-stream, switch to
+                            // looking up by streamId.)
+                            for (auto& [handle, info] : streams_) {
+                                if (info.type != StreamType::StreamOut) continue;
+                                info.status = newStatus;
+                                notifications.emplace_back(handle, newStatus);
+                            }
+                            innerCb = callbacks_;
+                        }
+
+                        if (innerCb.onStreamStatus) {
+                            for (auto& [handle, status] : notifications) {
+                                innerCb.onStreamStatus(handle, status);
+                            }
+                        }
+                    });
+
+                // Start the WatchStatus stream at connection time so we never miss status updates
+                out->startWatching();
+            }
+        }
+        if (!connectFailed && out != existingOut) newOut = out;
+    } else {
+        auto in = existingIn ? existingIn
+                              : std::shared_ptr<StreamInGrpcClientInterface>(
+                                    std::make_shared<StreamInGrpcClient>());
+        if (!in->isConnected()) {
+            if (!in->connect(targetSnap)) {
+                LogError(logCategory, "gRPC streamin connect failed (target=%s)", targetSnap.c_str());
+                connectFailed = true;
+            } else {
+                LogInfo(logCategory, "gRPC streamin connected (target=%s)", targetSnap.c_str());
+            }
+        }
+        if (!connectFailed && in != existingIn) newIn = in;
+    }
+
+    if (connectFailed) {
+        // Re-snapshot callbacks under lock, then fire outside.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
             cb = callbacks_;
         }
+        if (cb.onStreamError) cb.onStreamError(0, StreamError::NetworkError);
+        return -1;
     }
 
-    // Invoke callbacks outside lock to avoid deadlock if callback re-enters
-    if (invalidType) {
-        if (cb.onStreamError) {
-            cb.onStreamError(0, StreamError::InvalidStreamType);
-        }
-        return -1;
+    // --- Phase 3: short critical section --- publish + allocate handle.
+    StreamHandle handle = -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (newOut) grpcClient_         = newOut;
+        if (newIn)  streamInGrpcClient_ = newIn;
+        // Cache deviceId if the provider produced one in phase 2.
+        if (deviceId_ == 0 && deviceIdSnap != 0) deviceId_ = deviceIdSnap;
+
+        handle = nextHandle_++;
+        streams_[handle] = {type, StreamStatus::Created, StreamError::NoError, {}};
+        cb = callbacks_;
+        LogInfo(logCategory, "created handle=%d type=%s status=Created",
+                handle, type == StreamType::StreamOut ? "StreamOut" : "StreamIn");
     }
-    if (connectFailed) {
-        if (cb.onStreamError) {
-            cb.onStreamError(0, StreamError::NetworkError);
-        }
-        return -1;
-    }
-    if (cb.onStreamStatus) {
-        cb.onStreamStatus(handle, StreamStatus::Created);
-    }
+
+    if (cb.onStreamStatus) cb.onStreamStatus(handle, StreamStatus::Created);
     return handle;
 }
 
 void MediaControllerImpl::start(StreamHandle handle, const StreamConfiguration& configuration) {
     GlobalCallbacks cb;
     MediaController::StreamError errorToReport = StreamError::NoError;
-    StreamoutGrpcClientInterface* outClient = nullptr;
-    StreamInGrpcClientInterface*  inClient  = nullptr;
+    std::shared_ptr<StreamoutGrpcClientInterface> outClient;
+    std::shared_ptr<StreamInGrpcClientInterface>  inClient;
     StreamType streamType = StreamType::StreamOut;  // overwritten below; value irrelevant on error
 
     {
@@ -295,27 +351,23 @@ void MediaControllerImpl::start(StreamHandle handle, const StreamConfiguration& 
             cb = callbacks_;
         } else {
             auto& info = it->second;
-            if (info.status == StreamStatus::Active) {
-                info.lastError = StreamError::AlreadyStarted;
-                errorToReport = StreamError::AlreadyStarted;
-                cb = callbacks_;
+            // Pass-through: do not gate on current status. The lower layer
+            // owns the state machine; we just forward the call.
+            info.config = configuration;
+            streamType = info.type;
+            if (streamType == StreamType::StreamOut) {
+                outClient = grpcClient_;
             } else {
-                info.config = configuration;
-                streamType = info.type;
-                if (streamType == StreamType::StreamOut) {
-                    outClient = grpcClient_.get();
-                } else {
-                    inClient = streamInGrpcClient_.get();
-                }
-                cb = callbacks_;
-
-                LogInfo(logCategory, "start handle=%d type=%s url=%s port=%u status=%s",
-                        handle,
-                        streamType == StreamType::StreamOut ? "StreamOut" : "StreamIn",
-                        configuration.url.c_str(),
-                        static_cast<unsigned>(configuration.port),
-                        statusToString(info.status));
+                inClient = streamInGrpcClient_;
             }
+            cb = callbacks_;
+
+            LogInfo(logCategory, "start handle=%d type=%s url=%s port=%u status=%s",
+                    handle,
+                    streamType == StreamType::StreamOut ? "StreamOut" : "StreamIn",
+                    configuration.url.c_str(),
+                    static_cast<unsigned>(configuration.port),
+                    statusToString(info.status));
         }
     }
 
@@ -369,8 +421,8 @@ void MediaControllerImpl::start(StreamHandle handle, const StreamConfiguration& 
 
 void MediaControllerImpl::stop(StreamHandle handle) {
     GlobalCallbacks cb;
-    StreamoutGrpcClientInterface* outClient = nullptr;
-    StreamInGrpcClientInterface*  inClient  = nullptr;
+    std::shared_ptr<StreamoutGrpcClientInterface> outClient;
+    std::shared_ptr<StreamInGrpcClientInterface>  inClient;
     StreamType streamType = StreamType::StreamOut;
 
     {
@@ -381,16 +433,14 @@ void MediaControllerImpl::stop(StreamHandle handle) {
         }
 
         auto& info = it->second;
-        if (info.status == StreamStatus::Stopped || info.status == StreamStatus::Idle) {
-            return;  // already stopped, no-op
-        }
-
+        // Pass-through: do not gate on current status. The lower layer owns
+        // the state machine; we just forward the call and record "Stopping".
         info.status = StreamStatus::Stopping;
         streamType = info.type;
         if (streamType == StreamType::StreamOut) {
-            outClient = grpcClient_.get();
+            outClient = grpcClient_;
         } else {
-            inClient = streamInGrpcClient_.get();
+            inClient = streamInGrpcClient_;
         }
         cb = callbacks_;
 
@@ -431,7 +481,7 @@ void MediaControllerImpl::stop(StreamHandle handle) {
 }
 
 MediaController::StreamStatus MediaControllerImpl::getStatus(StreamHandle handle) const {
-    StreamInGrpcClientInterface* inClient = nullptr;
+    std::shared_ptr<StreamInGrpcClientInterface> inClient;
     StreamType streamType = StreamType::StreamOut;
     StreamStatus cached = StreamStatus::Idle;
 
@@ -444,7 +494,7 @@ MediaController::StreamStatus MediaControllerImpl::getStatus(StreamHandle handle
         streamType = it->second.type;
         cached = it->second.status;
         if (streamType == StreamType::StreamIn) {
-            inClient = streamInGrpcClient_.get();
+            inClient = streamInGrpcClient_;
         }
     }
 

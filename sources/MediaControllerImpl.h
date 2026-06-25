@@ -47,17 +47,14 @@ private:
         StreamConfiguration config;
     };
 
-    bool ensureStreamoutConnected();
-    bool ensureStreamInConnected();
-
     GlobalCallbacks callbacks_;
     mutable std::map<StreamHandle, StreamInfo> streams_;
     StreamHandle nextHandle_ = 1;
     mutable std::mutex mutex_;
 
-    std::unique_ptr<StreamoutGrpcClientInterface> grpcClient_;
+    std::shared_ptr<StreamoutGrpcClientInterface> grpcClient_;
     std::string grpcTarget_ = "127.0.0.1:50051";
-    std::unique_ptr<StreamInGrpcClientInterface> streamInGrpcClient_;
+    std::shared_ptr<StreamInGrpcClientInterface> streamInGrpcClient_;
     std::string streamInGrpcTarget_ = "127.0.0.1:50052";
     uint32_t deviceId_ = 0xFF00;
     std::function<uint32_t()> deviceIdProvider_;
