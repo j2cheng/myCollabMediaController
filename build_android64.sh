@@ -10,6 +10,7 @@ rm -rf build-arm64
 # Configure CMake for 64-bit Android build
 cmake -S . -B build-arm64 \
   -DCMAKE_BUILD_TYPE=Debug \
+  -DUSE_FOUNDATION=OFF \
   -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
   -DANDROID_ABI="arm64-v8a" \
   -DANDROID_PLATFORM="$GRPC_ANDROID_PLATFORM" \

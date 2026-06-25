@@ -84,8 +84,8 @@ cmake --build build
 The contract has two sides:
 
 What	Who implements	Where
-IMediaControllerInstance	You (your module)	MediaController.cpp
-IMediaControllerFactory	You (your module)	MediaController.cpp
+IMediaControllerInstance	You (your module)	MediaControllerImpl.cpp
+IMediaControllerFactory	You (your module)	MediaControllerImpl.cpp
 MediaControllerManager	mk2 app	Somewhere in the mk2 codebase
 The MediaControllerManager singleton is the mk2 app's orchestrator. It:
 
@@ -138,6 +138,63 @@ to build only mediacontroller.a:
   cmake --build build --target mediacontroller
 
 
+
+
+------build with Linux (standalone, using the prebuilt gRPC bundle)------------------
+The project's CMake uses `find_package(protobuf CONFIG REQUIRED)` which needs
+`protobuf-config.cmake`. Debian's libprotobuf-dev does NOT ship that file, so
+we reuse the prebuilt bundle that the Android cross-build already pulls in.
+
+Despite the path saying "android", `host_sysroot/grpc-v1.78.1/` contains
+native Linux x86_64 binaries+libs (protoc, grpc_cpp_plugin, libprotobuf.a,
+libgrpc++.a, abseil, etc.) — it's the build-host toolchain used by the
+Android cross-compile, and is perfectly valid for Linux builds too.
+
+Step 1: locate the bundle on your machine. The parent directory varies by
+checkout (~/shared/, ~/collab_stream_in/, etc.) — find it with:
+
+  find $HOME -name protobuf-config.cmake 2>/dev/null
+
+Expected output (one or more lines):
+  .../platforms/android/cache/host_sysroot/grpc-v1.78.1/lib/cmake/protobuf/protobuf-config.cmake
+  .../platforms/android/cache/target_sysroot/grpc-v1.78.1/lib/cmake/protobuf/protobuf-config.cmake
+
+Use the **host_sysroot** entry (the target_sysroot is for Android arm64, not
+Linux x86_64). Set GRPC to the grpc-v1.78.1 directory (5 levels up from the
+protobuf-config.cmake file):GRPC=$HOME/shared/platforms/android/cache/host_sysroot/grpc-v1.78.1
+
+  export GRPC=/full/path/to/.../host_sysroot/grpc-v1.78.1
+
+export GRPC=/home/builduser/collab_stream_in/platforms/android/cache/host_sysroot/grpc-v1.78.1
+
+Sanity check:
+  ls "$GRPC/lib/cmake/protobuf/protobuf-config.cmake"   # must succeed
+
+Step 2: configure and build (no orchestrator, no Foundation):
+
+  rm -rf build
+  cmake -S . -B build \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DUSE_FOUNDATION=OFF \
+    -DCMAKE_PREFIX_PATH="$GRPC" \
+    -Dprotobuf_DIR="$GRPC/lib/cmake/protobuf" \
+    -DgRPC_DIR="$GRPC/lib/cmake/grpc"
+
+  cmake --build build
+  ./build/test/unit_test
+
+Notes:
+- The variable name is lowercase `protobuf_DIR` (matches the lowercase package
+  name in `find_package(protobuf ...)`). Capital `Protobuf_DIR` is ignored.
+- USE_FOUNDATION=OFF makes MediaControllerImpl.cpp / StreamoutGrpcClient.cpp log via
+  std::cout/std::cerr instead of Foundation::Log. Drop this flag (or set it to
+  ON) if you have ../collab_orchestrator/FindFoundation.cmake available.
+- HOST_PROTOC / HOST_GRPC_CPP_PLUGIN flags are only consulted on ANDROID builds;
+  omit them for Linux.
+
+If you have the orchestrator + env.sh set up, the simpler path is:
+  ./build_linux.sh Debug
+which sources $HOME/shared/platforms/linux/env.sh and passes the same flags.
 
 
 ------build with Android NDK------------------

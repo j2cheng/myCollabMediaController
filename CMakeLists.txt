@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.14)
 project(collab_media_controller LANGUAGES CXX)
 
+# Use Foundation for logging. Default ON (matches upstream behaviour).
+# Pass -DUSE_FOUNDATION=OFF to build without Foundation; logging falls back to std::cout/std::cerr.
+option(USE_FOUNDATION "Use Foundation library for logging" ON)
+
 # Platform detection message
 if(ANDROID)
     message(STATUS "=== Building for ANDROID ===")
@@ -38,14 +42,27 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Find protobuf and gRPC once at the top level
 if(ANDROID)
     find_package(protobuf CONFIG REQUIRED)
+    # OpenSSL temporarily disabled - not needed for current Android build.
+    # include(${CMAKE_CURRENT_LIST_DIR}/../android_openssl/android_openssl.cmake)
 else()
-    # Linux distros often provide Protobuf via CMake's FindProtobuf module.
+    # For Linux, use CONFIG mode to ensure we use gRPC-provided protobuf cmake files
     find_package(protobuf CONFIG QUIET)
     if(NOT protobuf_FOUND)
         find_package(Protobuf REQUIRED)
     endif()
+    # Find OpenSSL before gRPC (gRPC depends on it).
+    #find_package(OpenSSL REQUIRED)
 endif()
+
 find_package(gRPC CONFIG REQUIRED)
+
+if(USE_FOUNDATION)
+    # Foundation: use the orchestrator's FindFoundation module which understands
+    # both the source tree (Linux) and dist layouts (Android/Windows).
+    set(ORCHESTRATOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../collab_orchestrator")
+    list(APPEND CMAKE_MODULE_PATH "${ORCHESTRATOR_DIR}")
+    find_package(Foundation REQUIRED)
+endif()
 
 add_subdirectory(sources)
 

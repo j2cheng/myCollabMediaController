@@ -1,7 +1,8 @@
 #pragma once
 
-#include "MediaControllerInterface.h"
+#include "MediaController.h"
 #include "grpcstreamout/StreamoutGrpcClientInterface.h"
+#include "grpcstreamin/StreamInGrpcClientInterface.h"
 #include <map>
 #include <memory>
 #include <mutex>
@@ -31,6 +32,8 @@ public:
     // gRPC client injection (for testing vs production)
     void setGrpcClient(std::unique_ptr<StreamoutGrpcClientInterface> client);
     void setGrpcTarget(const std::string& target);
+    void setStreamInGrpcClient(std::unique_ptr<StreamInGrpcClientInterface> client);
+    void setStreamInGrpcTarget(const std::string& target);
     void setDeviceId(uint32_t id);
     void setDeviceIdProvider(std::function<uint32_t()> provider);
 
@@ -45,14 +48,17 @@ private:
     };
 
     bool ensureStreamoutConnected();
+    bool ensureStreamInConnected();
 
     GlobalCallbacks callbacks_;
-    std::map<StreamHandle, StreamInfo> streams_;
+    mutable std::map<StreamHandle, StreamInfo> streams_;
     StreamHandle nextHandle_ = 1;
     mutable std::mutex mutex_;
 
     std::unique_ptr<StreamoutGrpcClientInterface> grpcClient_;
     std::string grpcTarget_ = "127.0.0.1:50051";
+    std::unique_ptr<StreamInGrpcClientInterface> streamInGrpcClient_;
+    std::string streamInGrpcTarget_ = "127.0.0.1:50052";
     uint32_t deviceId_ = 0xFF00;
     std::function<uint32_t()> deviceIdProvider_;
 };

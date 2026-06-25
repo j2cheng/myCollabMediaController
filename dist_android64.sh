@@ -16,9 +16,9 @@ mkdir -p "${DIST_INCLUDE}"
 mkdir -p "${DIST_CMAKE}"
 mkdir -p "${DIST_LIB}"
 
-# 2. Copy MediaControllerInterface.h
-echo "Copying MediaControllerInterface.h..."
-cp mock/MediaControllerInterface.h "${DIST_INCLUDE}/"
+# 2. Copy MediaController.h
+echo "Copying MediaController.h..."
+cp mock/MediaController.h "${DIST_INCLUDE}/MediaController.h"
 
 # 3. Copy generated makefiles to cmake folder
 echo "Copying CMake files..."

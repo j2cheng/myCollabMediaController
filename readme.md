@@ -7,9 +7,9 @@ mediacontroller/
 ├── CMakeLists.txt                          # Top-level CMake — finds packages, adds subdirectories
 ├── sources/                                # Production code → builds libmediacontroller.a
 │   ├── CMakeLists.txt                      #   Library build: proto gen + static lib
-│   ├── MediaController.h                   #   Implementation header
-│   ├── MediaController.cpp                 #   Implementation of MediaController
-│   ├── MediaController.md                  #   Implementation design notes
+│   ├── MediaControllerImpl.h               #   Implementation header (defines MediaControllerImpl)
+│   ├── MediaControllerImpl.cpp             #   Implementation of MediaController + MediaControllerImpl
+│   ├── MediaControllerImpl.md              #   Implementation design notes
 │   ├── grpcstreamout/                      #   gRPC client for StreamOut (lower layer)
 │   │   ├── grpc_str_out.proto              #     Service definition
 │   │   ├── StreamoutGrpcClientInterface.h  #     Abstract interface
@@ -17,9 +17,9 @@ mediacontroller/
 │   │   └── StreamoutGrpcClient.cpp         #     Real gRPC client implementation
 │   └── grpcstreamin/                       #   gRPC client for StreamIn (future)
 ├── mock/                                   # External dependencies not yet available
-│   ├── MediaControllerInterface.h          #   Interface contract from mk2 app
-│   ├── DeviceMock.h                        #   Mock device functions
-│   └── StreamoutGrpcClientMock.h           #   Mock gRPC client for testing
+│   ├── MediaController.h                    #   Public API (`class MediaController`) from mk2 app
+│   ├── DeviceMock.h                         #   Mock device functions
+│   └── StreamoutGrpcClientMock.h            #   Mock gRPC client for testing
 ├── test/                                   # Test code — links libmediacontroller.a
 │   ├── CMakeLists.txt                      #   Test build: unit_test exe
 │   └── unit_test.cpp                       #   Unit test + integration test
@@ -47,13 +47,13 @@ The `sources/` folder builds as a static library (`libmediacontroller.a`). In th
 
 ### MEDIACONTROLLER_INTERFACE_DIR
 
-The library needs `MediaControllerInterface.h`. By default it looks in `mock/`, so standalone builds work out of the box:
+The library needs `MediaController.h`. By default it looks in `mock/`, so standalone builds work out of the box:
 
 ```bash
 cmake -S . -B build                 # uses mock/ — no flag needed
 ```
 
-When integrating into the mk2 app (or any other project that provides the real `MediaControllerInterface.h`), pass the actual path:
+When integrating into the mk2 app (or any other project that provides the real `MediaController.h`), pass the actual path:
 
 ```bash
 cmake -S . -B build -DMEDIACONTROLLER_INTERFACE_DIR=/path/to/mk2/includes
@@ -147,6 +147,6 @@ Because gRPC is consumed as a pre-built sysroot (`$GRPC_INSTALL_DIR`), it must b
 
 ### Distribution Package
 
-`dist_android64.sh` collects `MediaControllerInterface.h`, the CMake metadata, and `libmediacontroller.a` into `collab_media_controller_dist/` and zips it to `collab_media_controller_dist.zip`.
+`dist_android64.sh` collects `MediaController.h`, the CMake metadata, and `libmediacontroller.a` into `collab_media_controller_dist/` and zips it to `collab_media_controller_dist.zip`.
 
 > Note: `zip` is not installed in the dev container — run `dist_android64.sh` on the host.

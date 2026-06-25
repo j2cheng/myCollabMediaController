@@ -1,5 +1,42 @@
-#include "MediaController.h"
+#include "MediaControllerImpl.h"
 #include "grpcstreamout/StreamoutGrpcClient.h"
+#include "grpcstreamin/StreamInGrpcClient.h"
+
+#ifdef USE_FOUNDATION
+#include "Logging/Log.hpp"
+#include <atomic>
+
+using Foundation::Log;
+
+static Log::Category logCategory;
+static std::atomic<bool> logInitialized{false};
+
+static void initLogging() {
+    if (!logInitialized.exchange(true)) {
+        logCategory = Log::GetInstance().AddCategory("MediaController");
+    }
+}
+#else
+#include <cstdarg>
+#include <cstdio>
+#include <iostream>
+
+namespace {
+inline void mcLog(std::ostream& os, const char* level, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    char buf[1024];
+    std::vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    os << "[" << level << "] [MediaController] " << buf << std::endl;
+}
+inline void initLogging() {}
+} // namespace
+
+#define LogInfo(cat, ...)    ::mcLog(std::cout, "INFO",  __VA_ARGS__)
+#define LogWarning(cat, ...) ::mcLog(std::cout, "WARN",  __VA_ARGS__)
+#define LogError(cat, ...)   ::mcLog(std::cerr, "ERROR", __VA_ARGS__)
+#endif
 
 static const char* statusToString(MediaController::StreamStatus s) {
     switch (s) {
@@ -77,13 +114,13 @@ bool MediaController::isValidHandle(StreamHandle handle) const {
 void MediaControllerImpl::setGlobalCallbacks(const GlobalCallbacks& callbacks) {
     std::lock_guard<std::mutex> lock(mutex_);
     callbacks_.onStreamStatus = [callbacks](StreamHandle handle, StreamStatus status) {
-        std::cout << "[MediaController] >> onStreamStatus(handle=" << handle
-                  << ", status=" << statusToString(status) << ")" << std::endl;
+        initLogging();
+        LogInfo(logCategory, "onStreamStatus(handle=%d, status=%s)", handle, statusToString(status));
         if (callbacks.onStreamStatus) callbacks.onStreamStatus(handle, status);
     };
     callbacks_.onStreamError = [callbacks](StreamHandle handle, StreamError error) {
-        std::cout << "[MediaController] >> onStreamError(handle=" << handle
-                  << ", error=" << errorToString(error) << ")" << std::endl;
+        initLogging();
+        LogWarning(logCategory, "onStreamError(handle=%d, error=%s)", handle, errorToString(error));
         if (callbacks.onStreamError) callbacks.onStreamError(handle, error);
     };
 }
@@ -96,6 +133,16 @@ void MediaControllerImpl::setGrpcClient(std::unique_ptr<StreamoutGrpcClientInter
 void MediaControllerImpl::setGrpcTarget(const std::string& target) {
     std::lock_guard<std::mutex> lock(mutex_);
     grpcTarget_ = target;
+}
+
+void MediaControllerImpl::setStreamInGrpcClient(std::unique_ptr<StreamInGrpcClientInterface> client) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    streamInGrpcClient_ = std::move(client);
+}
+
+void MediaControllerImpl::setStreamInGrpcTarget(const std::string& target) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    streamInGrpcTarget_ = target;
 }
 
 void MediaControllerImpl::setDeviceId(uint32_t id) {
@@ -125,13 +172,13 @@ void MediaControllerImpl::deinit() {
     streams_.clear();
     nextHandle_ = 1;
     deviceId_ = 0;
-    std::cout << "[MediaController] deinit complete" << std::endl;
+    LogInfo(logCategory, "deinit complete");
 }
 
 bool MediaControllerImpl::ensureStreamoutConnected() {
     // Lazy-init: create gRPC client if not injected externally
     if (!grpcClient_) {
-        // Include here to avoid header dependency in MediaController.h
+        // Include here to avoid header dependency in MediaControllerImpl.h
         // (StreamoutGrpcClient.h pulls in grpc++ headers)
         grpcClient_ = std::make_unique<StreamoutGrpcClient>();
     }
@@ -139,7 +186,7 @@ bool MediaControllerImpl::ensureStreamoutConnected() {
         return true;
     }
     if (!grpcClient_->connect(grpcTarget_)) {
-        std::cout << "[MediaController] gRPC streamout connect failed" << std::endl;
+        LogError(logCategory, "gRPC streamout connect failed");
         return false;
     }
     // Send device ID immediately after connecting
@@ -155,9 +202,8 @@ bool MediaControllerImpl::ensureStreamoutConnected() {
     // Register status callback to receive StreamoutStatusResponse from server
     grpcClient_->setStatusCallback(
         [this](int32_t streamId, int32_t statusCode, const std::string& statusInfo) {
-            std::cout << "[MediaController] WatchStatus: stream_id=" << streamId
-                      << " status_code=" << statusCode
-                      << " status_info=\"" << statusInfo << "\"" << std::endl;
+            LogInfo(logCategory, "WatchStatus: stream_id=%d status_code=%d status_info=\"%s\"",
+                    streamId, statusCode, statusInfo.c_str());
 
             GlobalCallbacks cb;
             std::vector<std::pair<StreamHandle, StreamStatus>> notifications;
@@ -194,6 +240,23 @@ bool MediaControllerImpl::ensureStreamoutConnected() {
     return true;
 }
 
+bool MediaControllerImpl::ensureStreamInConnected() {
+    // Lazy-init: create gRPC client if not injected externally
+    if (!streamInGrpcClient_) {
+        // Include here to avoid header dependency in MediaControllerImpl.h
+        streamInGrpcClient_ = std::make_unique<StreamInGrpcClient>();
+    }
+    if (streamInGrpcClient_->isConnected()) {
+        return true;
+    }
+    if (!streamInGrpcClient_->connect(streamInGrpcTarget_)) {
+        LogError(logCategory, "gRPC streamin connect failed (target=%s)", streamInGrpcTarget_.c_str());
+        return false;
+    }
+    LogInfo(logCategory, "gRPC streamin connected (target=%s)", streamInGrpcTarget_.c_str());
+    return true;
+}
+
 MediaController::StreamHandle MediaControllerImpl::create(StreamType type) {
     GlobalCallbacks cb;
     StreamHandle handle = -1;
@@ -216,17 +279,17 @@ MediaController::StreamHandle MediaControllerImpl::create(StreamType type) {
                 cb = callbacks_;
             }
         } else if (!invalidType && type == StreamType::StreamIn) {
-            // TODO: connect grpcstreamin when implemented
-            std::cout << "[MediaController] StreamIn gRPC not yet implemented" << std::endl;
+            if (!ensureStreamInConnected()) {
+                connectFailed = true;
+                cb = callbacks_;
+            }
         }
 
         if (!connectFailed) {
             handle = nextHandle_++;
             streams_[handle] = {type, StreamStatus::Created, StreamError::NoError, {}};
-            std::cout << "[MediaController] created handle=" << handle
-                      << " type=" << (type == StreamType::StreamOut ? "StreamOut" : "StreamIn")
-                      << " status=Created"
-                      << std::endl;
+            LogInfo(logCategory, "created handle=%d type=%s status=Created",
+                    handle, type == StreamType::StreamOut ? "StreamOut" : "StreamIn");
             cb = callbacks_;
         }
     }
@@ -253,7 +316,9 @@ MediaController::StreamHandle MediaControllerImpl::create(StreamType type) {
 void MediaControllerImpl::start(StreamHandle handle, const StreamConfiguration& configuration) {
     GlobalCallbacks cb;
     MediaController::StreamError errorToReport = StreamError::NoError;
-    StreamoutGrpcClientInterface* client = nullptr;
+    StreamoutGrpcClientInterface* outClient = nullptr;
+    StreamInGrpcClientInterface*  inClient  = nullptr;
+    StreamType streamType = StreamType::StreamOut;  // overwritten below; value irrelevant on error
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -269,14 +334,20 @@ void MediaControllerImpl::start(StreamHandle handle, const StreamConfiguration& 
                 cb = callbacks_;
             } else {
                 info.config = configuration;
-                client = grpcClient_.get();
+                streamType = info.type;
+                if (streamType == StreamType::StreamOut) {
+                    outClient = grpcClient_.get();
+                } else {
+                    inClient = streamInGrpcClient_.get();
+                }
                 cb = callbacks_;
 
-                std::cout << "[MediaController] start handle=" << handle
-                          << " url=" << configuration.url
-                          << " port=" << configuration.port
-                          << " status=" << statusToString(info.status)
-                          << std::endl;
+                LogInfo(logCategory, "start handle=%d type=%s url=%s port=%u status=%s",
+                        handle,
+                        streamType == StreamType::StreamOut ? "StreamOut" : "StreamIn",
+                        configuration.url.c_str(),
+                        static_cast<unsigned>(configuration.port),
+                        statusToString(info.status));
             }
         }
     }
@@ -289,47 +360,51 @@ void MediaControllerImpl::start(StreamHandle handle, const StreamConfiguration& 
         return;
     }
 
-    // Send configuration and start command to gRPC streamout server
-    if (client) {
-        if (!client->setPort(std::to_string(configuration.port))) {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                auto it = streams_.find(handle);
-                if (it != streams_.end()) {
-                    it->second.status = StreamStatus::Error;
-                    it->second.lastError = StreamError::StartupFailed;
-                }
-            }
-            if (cb.onStreamError) {
-                cb.onStreamError(handle, StreamError::StartupFailed);
-            }
+    // Helper: mark stream as failed under lock
+    auto markStartupFailed = [&]() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = streams_.find(handle);
+        if (it != streams_.end()) {
+            it->second.status = StreamStatus::Error;
+            it->second.lastError = StreamError::StartupFailed;
+        }
+    };
+
+    // Dispatch to the correct gRPC client based on stream type
+    if (streamType == StreamType::StreamOut && outClient) {
+        if (!outClient->setPort(std::to_string(configuration.port))) {
+            markStartupFailed();
+            if (cb.onStreamError) cb.onStreamError(handle, StreamError::StartupFailed);
             return;
         }
 
         //Note: startStream takes arguments, it is used in streamout apk for stream index.
-        //      for now, we just set to 0. 
+        //      for now, we just set to 0.
         //      Ideally, it should be the same as 'handle'.
-        if (!client->startStream(0)) {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                auto it = streams_.find(handle);
-                if (it != streams_.end()) {
-                    it->second.status = StreamStatus::Error;
-                    it->second.lastError = StreamError::StartupFailed;
-                }
-            }
-            if (cb.onStreamError) {
-                cb.onStreamError(handle, StreamError::StartupFailed);
-            }
+        if (!outClient->startStream(0)) {
+            markStartupFailed();
+            if (cb.onStreamError) cb.onStreamError(handle, StreamError::StartupFailed);
+            return;
+        }
+    } else if (streamType == StreamType::StreamIn && inClient) {
+        // StreamIn proto carries address/port/path in the StartStreamRequest itself.
+        // StreamConfiguration has no `path` field yet — pass empty for now.
+        if (!inClient->startStream(configuration.url,
+                                   static_cast<uint32_t>(configuration.port),
+                                   /*path=*/"")) {
+            markStartupFailed();
+            if (cb.onStreamError) cb.onStreamError(handle, StreamError::StartupFailed);
             return;
         }
     }
-    // Status will be updated when lower layer reports back via WatchStatus.
+    // Status will be updated when lower layer reports back via WatchStatus (StreamOut only).
 }
 
 void MediaControllerImpl::stop(StreamHandle handle) {
     GlobalCallbacks cb;
-    StreamoutGrpcClientInterface* client = nullptr;
+    StreamoutGrpcClientInterface* outClient = nullptr;
+    StreamInGrpcClientInterface*  inClient  = nullptr;
+    StreamType streamType = StreamType::StreamOut;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -344,11 +419,16 @@ void MediaControllerImpl::stop(StreamHandle handle) {
         }
 
         info.status = StreamStatus::Stopping;
-        client = grpcClient_.get();
+        streamType = info.type;
+        if (streamType == StreamType::StreamOut) {
+            outClient = grpcClient_.get();
+        } else {
+            inClient = streamInGrpcClient_.get();
+        }
         cb = callbacks_;
 
-        std::cout << "[MediaController] stop handle=" << handle
-                  << " status=Stopping" << std::endl;
+        LogInfo(logCategory, "stop handle=%d type=%s status=Stopping",
+                handle, streamType == StreamType::StreamOut ? "StreamOut" : "StreamIn");
     }
 
     // Fire Stopping callback outside lock
@@ -356,20 +436,27 @@ void MediaControllerImpl::stop(StreamHandle handle) {
         cb.onStreamStatus(handle, StreamStatus::Stopping);
     }
 
-    // Send stop command to gRPC streamout server
-    if (client) {
-        if (!client->stopStream(0)) {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                auto it = streams_.find(handle);
-                if (it != streams_.end()) {
-                    it->second.status = StreamStatus::Error;
-                    it->second.lastError = StreamError::StopFailed;
-                }
-            }
-            if (cb.onStreamError) {
-                cb.onStreamError(handle, StreamError::StopFailed);
-            }
+    // Helper: mark stream as failed under lock
+    auto markStopFailed = [&]() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = streams_.find(handle);
+        if (it != streams_.end()) {
+            it->second.status = StreamStatus::Error;
+            it->second.lastError = StreamError::StopFailed;
+        }
+    };
+
+    // Dispatch to the correct gRPC client based on stream type
+    if (streamType == StreamType::StreamOut && outClient) {
+        if (!outClient->stopStream(0)) {
+            markStopFailed();
+            if (cb.onStreamError) cb.onStreamError(handle, StreamError::StopFailed);
+            return;
+        }
+    } else if (streamType == StreamType::StreamIn && inClient) {
+        if (!inClient->stopStream()) {
+            markStopFailed();
+            if (cb.onStreamError) cb.onStreamError(handle, StreamError::StopFailed);
             return;
         }
     }
@@ -377,12 +464,43 @@ void MediaControllerImpl::stop(StreamHandle handle) {
 }
 
 MediaController::StreamStatus MediaControllerImpl::getStatus(StreamHandle handle) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = streams_.find(handle);
-    if (it == streams_.end()) {
-        return StreamStatus::Idle;
+    StreamInGrpcClientInterface* inClient = nullptr;
+    StreamType streamType = StreamType::StreamOut;
+    StreamStatus cached = StreamStatus::Idle;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = streams_.find(handle);
+        if (it == streams_.end()) {
+            return StreamStatus::Idle;
+        }
+        streamType = it->second.type;
+        cached = it->second.status;
+        if (streamType == StreamType::StreamIn) {
+            inClient = streamInGrpcClient_.get();
+        }
     }
-    return it->second.status;
+
+    // StreamOut: status is pushed via the WatchStatus server-streaming RPC,
+    // so the cached value is authoritative — just return it.
+    if (streamType == StreamType::StreamOut || !inClient) {
+        return cached;
+    }
+
+    // StreamIn: no server-streaming watch is defined in the proto, so we poll
+    // via the unary status() RPC. The proto's Status message is currently empty,
+    // so a successful reply only means "server is alive" — we update state only
+    // on failure (RPC error or Error reply), demoting to Error / NetworkError.
+    if (!inClient->status()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = streams_.find(handle);
+        if (it != streams_.end()) {
+            it->second.status = StreamStatus::Error;
+            it->second.lastError = StreamError::NetworkError;
+            cached = it->second.status;
+        }
+    }
+    return cached;
 }
 
 MediaController::StreamError MediaControllerImpl::getLastError(StreamHandle handle) const {

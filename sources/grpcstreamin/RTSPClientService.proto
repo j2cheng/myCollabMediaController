@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package collab.stream_in;
+
+// Note: the upstream version of this file references `collab.Error` from a
+// shared `collab/Error.proto`. That file is not available in this checkout,
+// so for now we use the inline `Error` defined at the bottom of this file
+// (in the same `collab.stream_in` package).
+
+service RTSPClientService
+{
+  rpc startStream(StartStreamRequest) returns (StartStreamReply);
+  rpc stopStream(StopStreamRequest) returns (StopStreamReply);
+  rpc status(StatusRequest) returns (StatusReply);
+}
+
+enum SinkType
+{
+  SINK_TYPE_UNSPECIFIED = 0;
+  // GStreamer fakesink
+  SINK_TYPE_FAKE = 1;
+  // GStreamer filesink
+  SINK_TYPE_FILE = 2;
+  // Crestron GStreamer UAC+UVC sink
+  SINK_TYPE_USB = 3;
+  // GStreamer auto(audio/video)sink
+  SINK_TYPE_AUTO = 4;
+}
+
+message Sink
+{
+  SinkType type = 1;
+  // maximum frames to process
+  optional uint64 num_buffers = 2;
+  // filesink location param
+  optional string location = 3;
+}
+
+message Pipeline
+{
+  // TODO: custom pipeline etc
+}
+
+message StartStreamRequest
+{
+  string address = 1;
+  uint32 port = 2;
+  string path = 3;
+
+  oneof audio
+  {
+    Sink asink = 4;
+    Pipeline apipeline = 5;
+  }
+
+  oneof video
+  {
+    Sink vsink = 6;
+    Pipeline vpipeline = 7;
+  }
+}
+
+message StartStreamReply
+{
+  oneof reply
+  {
+    Error error = 1;
+  }
+}
+
+message StopStreamRequest
+{
+}
+
+message StopStreamReply
+{
+  oneof reply
+  {
+    Error error = 1;
+  }
+}
+
+message StatusRequest
+{
+}
+
+message Status
+{
+}
+
+message StatusReply
+{
+  oneof reply
+  {
+    Error error = 1;
+    Status status = 2;
+  }
+}
+
+enum ErrorCode                                                                   
+{                                                                                
+  ERROR_CODE_UNSPECIFIED = 0;                                                    
+  ERROR_CODE_INVALID_STATE = 1;                                                  
+  ERROR_CODE_INVALID_OPERATION = 2;                                              
+  ERROR_CODE_INVALID_PARAMETER = 3;                                              
+  ERROR_CODE_RUNTIME_ERROR = 4;                                                  
+}                                                                                
+                                                                                 
+message Error                                                                    
+{                                                                                
+  ErrorCode code = 1;                                                            
+  optional string verbose = 2;                                                   
+}  

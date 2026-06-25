@@ -1,8 +1,8 @@
-# MediaController.cpp — Implementation Details
+# MediaControllerImpl.cpp — Implementation Details
 
 ## 1. Implemented Functions
 
-`MediaControllerImpl` derives from the abstract base class `MediaController` (defined in `MediaControllerInterface.h`) and implements all pure virtual methods:
+`MediaControllerImpl` derives from the abstract base class `MediaController` (defined in `MediaController.h`) and implements all pure virtual methods:
 
 | Function | Description |
 |----------|-------------|

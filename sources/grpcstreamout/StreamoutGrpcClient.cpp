@@ -1,5 +1,40 @@
 #include "StreamoutGrpcClient.h"
+
+#ifdef USE_FOUNDATION
+#include "Logging/Log.hpp"
+#include <atomic>
+
+using Foundation::Log;
+
+static Log::Category logCategory;
+static std::atomic<bool> logInitialized{false};
+
+static void initLogging() {
+    if (!logInitialized.exchange(true)) {
+        logCategory = Log::GetInstance().AddCategory("StreamoutGrpcClient");
+    }
+}
+#else
+#include <cstdarg>
+#include <cstdio>
 #include <iostream>
+
+namespace {
+inline void sgcLog(std::ostream& os, const char* level, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    char buf[1024];
+    std::vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    os << "[" << level << "] [StreamoutGrpcClient] " << buf << std::endl;
+}
+inline void initLogging() {}
+} // namespace
+
+#define LogInfo(cat, ...)    ::sgcLog(std::cout, "INFO",  __VA_ARGS__)
+#define LogWarning(cat, ...) ::sgcLog(std::cout, "WARN",  __VA_ARGS__)
+#define LogError(cat, ...)   ::sgcLog(std::cerr, "ERROR", __VA_ARGS__)
+#endif
 
 StreamoutGrpcClient::~StreamoutGrpcClient() {
     disconnect();
@@ -22,7 +57,8 @@ bool StreamoutGrpcClient::connect(const std::string& target) {
     // Wait outside lock — avoids blocking other threads for up to 3s
     auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(3);
     if (!channel_->WaitForConnected(deadline)) {
-        std::cout << "[StreamoutGrpcClient] connect failed: timeout reaching " << target << std::endl;
+        initLogging();
+        LogError(logCategory, "connect failed: timeout reaching %s", target.c_str());
         std::lock_guard<std::mutex> lock(mutex_);
         stub_.reset();
         channel_.reset();
@@ -33,7 +69,8 @@ bool StreamoutGrpcClient::connect(const std::string& target) {
     }
 
     connected_ = true;
-    std::cout << "[StreamoutGrpcClient] connected to " << target << std::endl;
+    initLogging();
+    LogInfo(logCategory, "connected to %s", target.c_str());
 
     // Start state watcher outside the lock so it doesn't block
 #ifdef GRPC_KEEPALIVE
@@ -68,7 +105,8 @@ void StreamoutGrpcClient::disconnect() {
     watchContext_.reset();
     stub_.reset();
     channel_.reset();
-    std::cout << "[StreamoutGrpcClient] disconnected" << std::endl;
+    initLogging();
+    LogInfo(logCategory, "disconnected");
 }
 
 bool StreamoutGrpcClient::isConnected() const {
@@ -86,13 +124,13 @@ bool StreamoutGrpcClient::setProductId(uint32_t id) {
     request.set_id(static_cast<int32_t>(id));
 
     auto status = stub_->StreamoutSetProductId(&context, request, &response);
+    initLogging();
     if (!status.ok()) {
-        std::cout << "[StreamoutGrpcClient] setProductId failed: " << status.error_message() << std::endl;
+        LogError(logCategory, "setProductId failed: %s", status.error_message().c_str());
         return false;
     }
 
-    std::cout << "[StreamoutGrpcClient] setProductId=" << id
-              << " success=" << response.success() << std::endl;
+    LogInfo(logCategory, "setProductId=%u success=%d", id, static_cast<int>(response.success()));
     return response.success();
 }
 
@@ -107,8 +145,9 @@ bool StreamoutGrpcClient::startStream(int32_t arg) {
     request.set_arg(arg);
 
     auto status = stub_->StreamoutStart(&context, request, &response);
+    initLogging();
     if (!status.ok()) {
-        std::cout << "[StreamoutGrpcClient] startStream failed: " << status.error_message() << std::endl;
+        LogError(logCategory, "startStream failed: %s", status.error_message().c_str());
 #ifdef AUTO_GRPC_RECONN
         connected_ = false;
         stub_.reset();
@@ -118,7 +157,7 @@ bool StreamoutGrpcClient::startStream(int32_t arg) {
         return false;
     }
 
-    std::cout << "[StreamoutGrpcClient] startStream success=" << response.success() << std::endl;
+    LogInfo(logCategory, "startStream success=%d", static_cast<int>(response.success()));
 
     return response.success();
 }
@@ -134,8 +173,9 @@ bool StreamoutGrpcClient::stopStream(int32_t arg) {
     request.set_arg(arg);
 
     auto status = stub_->StreamoutStop(&context, request, &response);
+    initLogging();
     if (!status.ok()) {
-        std::cout << "[StreamoutGrpcClient] stopStream failed: " << status.error_message() << std::endl;
+        LogError(logCategory, "stopStream failed: %s", status.error_message().c_str());
 #ifdef AUTO_GRPC_RECONN
         connected_ = false;
         stub_.reset();
@@ -145,7 +185,7 @@ bool StreamoutGrpcClient::stopStream(int32_t arg) {
         return false;
     }
 
-    std::cout << "[StreamoutGrpcClient] stopStream success=" << response.success() << std::endl;
+    LogInfo(logCategory, "stopStream success=%d", static_cast<int>(response.success()));
     return response.success();
 }
 
@@ -160,8 +200,9 @@ bool StreamoutGrpcClient::setPort(const std::string& port) {
     request.set_port(port);
 
     auto status = stub_->StreamoutSetPort(&context, request, &response);
+    initLogging();
     if (!status.ok()) {
-        std::cout << "[StreamoutGrpcClient] setPort failed: " << status.error_message() << std::endl;
+        LogError(logCategory, "setPort failed: %s", status.error_message().c_str());
         return false;
     }
 
@@ -179,8 +220,9 @@ bool StreamoutGrpcClient::setPipeline(const std::string& pipeline) {
     request.set_pipeline(pipeline);
 
     auto status = stub_->StreamoutSetPipeline(&context, request, &response);
+    initLogging();
     if (!status.ok()) {
-        std::cout << "[StreamoutGrpcClient] setPipeline failed: " << status.error_message() << std::endl;
+        LogError(logCategory, "setPipeline failed: %s", status.error_message().c_str());
         return false;
     }
 
@@ -212,14 +254,16 @@ void StreamoutGrpcClient::startWatching() {
     request.set_id(0);  // watch all streams
     watchReader_ = stub_->StreamoutWatchStatus(watchContext_.get(), request);
 
-    std::cout << "[StreamoutGrpcClient] WatchStatus stream opened, ready to receive" << std::endl;
+    initLogging();
+    LogInfo(logCategory, "WatchStatus stream opened, ready to receive");
 
     // Spawn thread just for the Read() loop
     watchThread_ = std::thread(&StreamoutGrpcClient::watchStatusLoop, this);
 }
 
 void StreamoutGrpcClient::watchStatusLoop() {
-    std::cout << "[StreamoutGrpcClient] watchStatusLoop started, waiting for server status..." << std::endl;
+    initLogging();
+    LogInfo(logCategory, "watchStatusLoop started, waiting for server status...");
 
     streamout::v1::StreamoutStatusResponse response;
     while (connected_ && watchReader_ && watchReader_->Read(&response)) {
@@ -235,7 +279,7 @@ void StreamoutGrpcClient::watchStatusLoop() {
         }
     }
 
-    std::cout << "[StreamoutGrpcClient] watchStatusLoop ended" << std::endl;
+    LogInfo(logCategory, "watchStatusLoop ended");
 
 #ifdef AUTO_GRPC_RECONN
     // If we lost connection unexpectedly, trigger reconnect
@@ -271,8 +315,9 @@ void StreamoutGrpcClient::stopReconnectLoop() {
 }
 
 void StreamoutGrpcClient::reconnectLoop() {
-    std::cout << "[StreamoutGrpcClient] reconnect loop started (interval="
-              << RECONNECT_INTERVAL.count() << "s)" << std::endl;
+    initLogging();
+    LogInfo(logCategory, "reconnect loop started (interval=%llds)",
+            static_cast<long long>(RECONNECT_INTERVAL.count()));
 
     while (reconnectRunning_) {
         // Sleep for the reconnect interval (interruptible via cv)
@@ -285,7 +330,7 @@ void StreamoutGrpcClient::reconnectLoop() {
 
         if (!reconnectRunning_) break;
 
-        std::cout << "[StreamoutGrpcClient] attempting reconnect to " << target_ << std::endl;
+        LogInfo(logCategory, "attempting reconnect to %s", target_.c_str());
 
         // Create channel under lock, then wait outside to avoid blocking other operations
         std::shared_ptr<grpc::Channel> ch;
@@ -300,18 +345,18 @@ void StreamoutGrpcClient::reconnectLoop() {
             channel_ = ch;
             stub_ = streamout::v1::StreamoutService::NewStub(channel_);
             connected_ = true;
-            std::cout << "[StreamoutGrpcClient] reconnected to " << target_ << std::endl;
+            LogInfo(logCategory, "reconnected to %s", target_.c_str());
             reconnectRunning_ = false;
 #ifdef GRPC_KEEPALIVE
             startStateWatch();
 #endif
         } else {
-            std::cout << "[StreamoutGrpcClient] reconnect failed, retrying in "
-                      << RECONNECT_INTERVAL.count() << "s" << std::endl;
+            LogWarning(logCategory, "reconnect failed, retrying in %llds",
+                       static_cast<long long>(RECONNECT_INTERVAL.count()));
         }
     }
 
-    std::cout << "[StreamoutGrpcClient] reconnect loop ended" << std::endl;
+    LogInfo(logCategory, "reconnect loop ended");
 }
 #endif
 
@@ -323,8 +368,9 @@ std::shared_ptr<grpc::Channel> StreamoutGrpcClient::createChannel(const std::str
     args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
     args.SetInt(GRPC_ARG_HTTP2_MAX_PINGS_WITHOUT_DATA, 0);
     args.SetInt(GRPC_ARG_HTTP2_BDP_PROBE, 0);
-    std::cout << "[StreamoutGrpcClient] creating channel with keepalive (ping="
-              << KEEPALIVE_TIME_MS << "ms, timeout=" << KEEPALIVE_TIMEOUT_MS << "ms)" << std::endl;
+    initLogging();
+    LogInfo(logCategory, "creating channel with keepalive (ping=%dms, timeout=%dms)",
+            KEEPALIVE_TIME_MS, KEEPALIVE_TIMEOUT_MS);
     return grpc::CreateCustomChannel(target, grpc::InsecureChannelCredentials(), args);
 #else
     return grpc::CreateChannel(target, grpc::InsecureChannelCredentials());
@@ -350,7 +396,8 @@ void StreamoutGrpcClient::stopStateWatch() {
 }
 
 void StreamoutGrpcClient::stateWatchLoop() {
-    std::cout << "[StreamoutGrpcClient] channel state watcher started" << std::endl;
+    initLogging();
+    LogInfo(logCategory, "channel state watcher started");
 
     while (stateWatchRunning_ && connected_) {
         std::shared_ptr<grpc::Channel> ch;
@@ -365,8 +412,7 @@ void StreamoutGrpcClient::stateWatchLoop() {
 
         if (state == GRPC_CHANNEL_TRANSIENT_FAILURE ||
             state == GRPC_CHANNEL_SHUTDOWN) {
-            std::cout << "[StreamoutGrpcClient] channel state FAILED (state="
-                      << static_cast<int>(state) << ")" << std::endl;
+            LogError(logCategory, "channel state FAILED (state=%d)", static_cast<int>(state));
             connected_ = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -385,6 +431,6 @@ void StreamoutGrpcClient::stateWatchLoop() {
     }
 
     stateWatchRunning_ = false;  // allow restart on next reconnect
-    std::cout << "[StreamoutGrpcClient] channel state watcher ended" << std::endl;
+    LogInfo(logCategory, "channel state watcher ended");
 }
 #endif

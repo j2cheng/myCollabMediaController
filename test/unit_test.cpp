@@ -10,6 +10,9 @@
 #include "MediaController.h"
 #include "DeviceMock.h"
 
+// Include the implementation definition for MediaControllerImpl
+#include "../sources/MediaControllerImpl.h"
+
 // ---------- Colored test output (gtest style) ----------
 #define CLR_RED     "\033[1;31m"
 #define CLR_GREEN   "\033[1;32m"
