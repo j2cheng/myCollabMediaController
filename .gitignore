@@ -3,7 +3,11 @@ build/
 
 # Ignore all folders starting with build-
 build-*/
+build_*/
 
 # Distribution output
 collab_media_controller_dist/
 collab_media_controller_dist.zip
+
+lib/
+include/
