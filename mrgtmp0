@@ -1,9 +1,0 @@
-# Ignore the exact folder named build
-build/
-
-# Ignore all folders starting with build-
-build-*/
-
-# Distribution output
-collab_media_controller_dist/
-collab_media_controller_dist.zip
