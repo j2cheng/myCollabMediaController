@@ -53,6 +53,7 @@ private:
     std::shared_ptr<grpc::Channel> channel_;
     std::unique_ptr<streamout::v1::StreamoutService::Stub> stub_;
     std::atomic<bool> connected_{false};
+    std::atomic<bool> shuttingDown_{false};  // set in disconnect(); blocks new watch/reconnect threads
     StatusCallback statusCallback_;
     std::thread watchThread_;
     std::unique_ptr<grpc::ClientContext> watchContext_;  // for cancelling streaming RPC
@@ -67,7 +68,8 @@ private:
     std::thread reconnectThread_;
     std::atomic<bool> reconnectRunning_{false};
     std::condition_variable reconnectCv_;
-    std::mutex reconnectMutex_;  // guards reconnectCv_ wait
+    std::mutex reconnectMutex_;          // guards reconnectCv_ wait
+    std::mutex reconnectControlMutex_;   // serializes startReconnectLoop/stopReconnectLoop
 
     void startReconnectLoop();
     void stopReconnectLoop();
@@ -78,6 +80,7 @@ private:
     // Keepalive watcher — monitors channel state for TRANSIENT_FAILURE
     std::thread stateWatchThread_;
     std::atomic<bool> stateWatchRunning_{false};
+    std::mutex stateWatchControlMutex_;   // serializes startStateWatch/stopStateWatch
 
     void startStateWatch();
     void stopStateWatch();

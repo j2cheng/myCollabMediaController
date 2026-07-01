@@ -29,6 +29,11 @@
 #include "Logging/Log.hpp"
 #include <mutex>
 
+// The foundation LogInfo/LogWarning/LogError macros expand to an unqualified
+// "Log::GetInstance()...". Bring Foundation::Log into scope so those macros
+// resolve in .cpp files that don't open the Foundation namespace.
+using ::Foundation::Log;
+
 namespace {
 ::Foundation::Log::Category logCategory;
 ::std::once_flag logInitOnce;

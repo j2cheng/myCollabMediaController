@@ -8,6 +8,20 @@ StreamoutGrpcClient::~StreamoutGrpcClient() {
 }
 
 bool StreamoutGrpcClient::connect(const std::string& target) {
+    // Quiesce any in-flight reconnect/state-watch threads so this manual
+    // connect cannot race with them on channel_/stub_/connected_ and on
+    // a second startStateWatch() spawn. shuttingDown_ blocks the exiting
+    // reconnect thread from re-spawning anything; we clear it again before
+    // building the new channel.
+    shuttingDown_ = true;
+#ifdef AUTO_GRPC_RECONN
+    stopReconnectLoop();
+#endif
+#ifdef GRPC_KEEPALIVE
+    stopStateWatch();
+#endif
+    shuttingDown_ = false;
+    std::shared_ptr<grpc::Channel> ch;
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -19,17 +33,19 @@ bool StreamoutGrpcClient::connect(const std::string& target) {
 
         channel_ = createChannel(target);
         stub_ = streamout::v1::StreamoutService::NewStub(channel_);
+        ch = channel_;  // local copy for thread-safe access outside lock
     }
 
     // Wait outside lock — avoids blocking other threads for up to 3s
     auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(3);
-    if (!channel_->WaitForConnected(deadline)) {
+    if (!ch->WaitForConnected(deadline)) {
         initLogging();
         LogError(logCategory, "connect failed: timeout reaching %s", target.c_str());
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         stub_.reset();
         channel_.reset();
 #ifdef AUTO_GRPC_RECONN
+        lock.unlock();  // release before startReconnectLoop to avoid AB-BA deadlock with reconnectLoop
         startReconnectLoop();
 #endif
         return false;
@@ -47,11 +63,14 @@ bool StreamoutGrpcClient::connect(const std::string& target) {
 }
 
 void StreamoutGrpcClient::disconnect() {
+    // Set first so any in-flight reconnect/stateWatch thread that finishes
+    // during the stop sequence below refuses to spawn replacement threads.
+    shuttingDown_ = true;
+#ifdef AUTO_GRPC_RECONN
+    stopReconnectLoop();   // stop reconnect first: prevents it from re-spawning state watch
+#endif
 #ifdef GRPC_KEEPALIVE
     stopStateWatch();
-#endif
-#ifdef AUTO_GRPC_RECONN
-    stopReconnectLoop();
 #endif
     connected_ = false;
 
@@ -70,6 +89,7 @@ void StreamoutGrpcClient::disconnect() {
 
     std::lock_guard<std::mutex> lock(mutex_);
     watchContext_.reset();
+    watchReader_.reset();
     stub_.reset();
     channel_.reset();
     initLogging();
@@ -119,6 +139,7 @@ bool StreamoutGrpcClient::startStream(int32_t arg) {
         connected_ = false;
         stub_.reset();
         channel_.reset();
+        lock.unlock();  // release before startReconnectLoop to avoid AB-BA deadlock with reconnectLoop
         startReconnectLoop();
 #endif
         return false;
@@ -130,7 +151,7 @@ bool StreamoutGrpcClient::startStream(int32_t arg) {
 }
 
 bool StreamoutGrpcClient::stopStream(int32_t arg) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     if (!connected_ || !stub_) return false;
 
     grpc::ClientContext context;
@@ -147,6 +168,7 @@ bool StreamoutGrpcClient::stopStream(int32_t arg) {
         connected_ = false;
         stub_.reset();
         channel_.reset();
+        lock.unlock();  // release before startReconnectLoop to avoid AB-BA deadlock with reconnectLoop
         startReconnectLoop();
 #endif
         return false;
@@ -213,6 +235,8 @@ void StreamoutGrpcClient::startWatching() {
         lock.unlock();
         watchThread_.join();
         lock.lock();
+        // disconnect() may have run while we were joining; re-validate state
+        if (!connected_ || !stub_ || !statusCallback_) return;
     }
 
     // Set up the reader synchronously so it's ready before any RPCs are sent
@@ -251,6 +275,8 @@ void StreamoutGrpcClient::watchStatusLoop() {
 #ifdef AUTO_GRPC_RECONN
     // If we lost connection unexpectedly, trigger reconnect
     if (connected_) {
+
+        LogInfo(logCategory, "watchStatusLoop need to reconnect");
         connected_ = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -265,6 +291,11 @@ void StreamoutGrpcClient::watchStatusLoop() {
 
 #ifdef AUTO_GRPC_RECONN
 void StreamoutGrpcClient::startReconnectLoop() {
+    // Serialize the check-set-join-spawn sequence so concurrent callers cannot
+    // double-spawn (which would assign to a joinable reconnectThread_ and call
+    // std::terminate).
+    std::lock_guard<std::mutex> g(reconnectControlMutex_);
+    if (shuttingDown_) return;      // disconnect in progress; do not respawn
     if (reconnectRunning_) return;  // already running
     reconnectRunning_ = true;
     if (reconnectThread_.joinable()) {
@@ -274,6 +305,7 @@ void StreamoutGrpcClient::startReconnectLoop() {
 }
 
 void StreamoutGrpcClient::stopReconnectLoop() {
+    std::lock_guard<std::mutex> g(reconnectControlMutex_);
     reconnectRunning_ = false;
     reconnectCv_.notify_all();
     if (reconnectThread_.joinable()) {
@@ -297,23 +329,28 @@ void StreamoutGrpcClient::reconnectLoop() {
 
         if (!reconnectRunning_) break;
 
-        LogInfo(logCategory, "attempting reconnect to %s", target_.c_str());
-
-        // Create channel under lock, then wait outside to avoid blocking other operations
+        // Snapshot target_ under lock to avoid a data race if connect() rewrites it concurrently.
+        std::string target;
         std::shared_ptr<grpc::Channel> ch;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            ch = createChannel(target_);
+            target = target_;
+            ch = createChannel(target);
         }
+
+        LogInfo(logCategory, "attempting reconnect to %s", target.c_str());
 
         auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(3);
         if (ch->WaitForConnected(deadline)) {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             channel_ = ch;
             stub_ = streamout::v1::StreamoutService::NewStub(channel_);
             connected_ = true;
-            LogInfo(logCategory, "reconnected to %s", target_.c_str());
+            LogInfo(logCategory, "reconnected to %s", target.c_str());
             reconnectRunning_ = false;
+
+            lock.unlock();  // unlock before starting state watch to avoid deadlock
+            startWatching();  // restart watchStatusLoop
 #ifdef GRPC_KEEPALIVE
             startStateWatch();
 #endif
@@ -346,6 +383,10 @@ std::shared_ptr<grpc::Channel> StreamoutGrpcClient::createChannel(const std::str
 
 #ifdef GRPC_KEEPALIVE
 void StreamoutGrpcClient::startStateWatch() {
+    // Serialize check-join-spawn so concurrent callers cannot assign to a
+    // joinable stateWatchThread_ (which would call std::terminate).
+    std::lock_guard<std::mutex> g(stateWatchControlMutex_);
+    if (shuttingDown_) return;  // disconnect in progress; do not respawn
     // Join old thread first to avoid race with stateWatchRunning_ reset at loop exit
     if (stateWatchThread_.joinable()) {
         stateWatchRunning_ = false;  // signal old loop to stop
@@ -356,6 +397,7 @@ void StreamoutGrpcClient::startStateWatch() {
 }
 
 void StreamoutGrpcClient::stopStateWatch() {
+    std::lock_guard<std::mutex> g(stateWatchControlMutex_);
     stateWatchRunning_ = false;
     if (stateWatchThread_.joinable()) {
         stateWatchThread_.join();

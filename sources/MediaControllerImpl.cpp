@@ -41,7 +41,10 @@ static const char* errorToString(MediaController::StreamError e) {
 
 // --- start of MediaController ---
 MediaController::MediaController()
-    : impl_(std::make_unique<MediaControllerImpl>()) {}
+    : impl_(std::make_unique<MediaControllerImpl>()) {
+    initLogging();
+    LogInfo(logCategory, "MediaControllerImpl created (built %s %s)", __DATE__, __TIME__);
+}
 
 MediaController::~MediaController() = default;
 
@@ -236,61 +239,72 @@ MediaController::StreamHandle MediaControllerImpl::create(StreamType type) {
         auto out = existingOut ? existingOut
                                 : std::shared_ptr<StreamoutGrpcClientInterface>(
                                       std::make_shared<StreamoutGrpcClient>());
+
+        // Register status callback BEFORE connect so that if the initial
+        // connect fails and the background reconnect later succeeds, the
+        // reconnect-driven startWatching() will have a callback to invoke.
+        out->setStatusCallback(
+            [this](int32_t streamId, int32_t statusCode, const std::string& statusInfo) {
+                LogInfo(logCategory, "WatchStatus: stream_id=%d status_code=%d status_info=\"%s\"",
+                        streamId, statusCode, statusInfo.c_str());
+
+                GlobalCallbacks innerCb;
+                std::vector<std::pair<StreamHandle, StreamStatus>> notifications;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    // Map gRPC StreamStatus to MediaController::StreamStatus
+                    StreamStatus newStatus = StreamStatus::Idle;
+                    switch (statusCode) {
+                        case 0: newStatus = StreamStatus::Created;   break;  // STREAM_STATUS_UNSPECIFIED
+                        case 1: newStatus = StreamStatus::Listening; break;  // STREAM_STATUS_READY
+                        case 2: newStatus = StreamStatus::Active;    break;  // STREAM_STATUS_CLIENT_CONNECTED
+                        case 3: newStatus = StreamStatus::Stopped;   break;  // STREAM_STATUS_STOPPED
+                        default: newStatus = StreamStatus::Error;    break;
+                    }
+
+                    // This callback is registered only on the StreamOut
+                    // gRPC client, so its status updates are only
+                    // meaningful for StreamOut handles. Skip StreamIn
+                    // entries so they aren't clobbered.
+                    // (streamId is always 0 today, i.e. "all" — once
+                    // the lower layer routes per-stream, switch to
+                    // looking up by streamId.)
+                    for (auto& [handle, info] : streams_) {
+                        if (info.type != StreamType::StreamOut) continue;
+                        info.status = newStatus;
+                        notifications.emplace_back(handle, newStatus);
+                    }
+                    innerCb = callbacks_;
+                }
+
+                if (innerCb.onStreamStatus) {
+                    for (auto& [handle, status] : notifications) {
+                        innerCb.onStreamStatus(handle, status);
+                    }
+                }
+            });
+
         if (!out->isConnected()) {
             if (!out->connect(targetSnap)) {
-                LogError(logCategory, "gRPC streamout connect failed");
+                LogError(logCategory, "gRPC streamout connect failed — reconnect loop running in background");
                 connectFailed = true;
+                // StreamoutGrpcClient::connect() already kicked its own
+                // reconnect loop. We just need to keep `out` alive (handled
+                // below by always assigning it to newOut).
             } else {
                 uint32_t id = deviceIdSnap;
                 if (id == 0 && deviceIdProviderSnap) id = deviceIdProviderSnap();
                 if (id != 0) out->setProductId(id);
 
-                // Register status callback to receive StreamoutStatusResponse from server
-                out->setStatusCallback(
-                    [this](int32_t streamId, int32_t statusCode, const std::string& statusInfo) {
-                        LogInfo(logCategory, "WatchStatus: stream_id=%d status_code=%d status_info=\"%s\"",
-                                streamId, statusCode, statusInfo.c_str());
-
-                        GlobalCallbacks innerCb;
-                        std::vector<std::pair<StreamHandle, StreamStatus>> notifications;
-                        {
-                            std::lock_guard<std::mutex> lock(mutex_);
-                            // Map gRPC StreamStatus to MediaController::StreamStatus
-                            StreamStatus newStatus = StreamStatus::Idle;
-                            switch (statusCode) {
-                                case 1: newStatus = StreamStatus::Listening; break;  // STREAM_STATUS_READY
-                                case 2: newStatus = StreamStatus::Active;    break;  // STREAM_STATUS_CLIENT_CONNECTED
-                                case 3: newStatus = StreamStatus::Stopped;   break;  // STREAM_STATUS_STOPPED
-                                default: newStatus = StreamStatus::Error;    break;
-                            }
-
-                            // This callback is registered only on the StreamOut
-                            // gRPC client, so its status updates are only
-                            // meaningful for StreamOut handles. Skip StreamIn
-                            // entries so they aren't clobbered.
-                            // (streamId is always 0 today, i.e. "all" — once
-                            // the lower layer routes per-stream, switch to
-                            // looking up by streamId.)
-                            for (auto& [handle, info] : streams_) {
-                                if (info.type != StreamType::StreamOut) continue;
-                                info.status = newStatus;
-                                notifications.emplace_back(handle, newStatus);
-                            }
-                            innerCb = callbacks_;
-                        }
-
-                        if (innerCb.onStreamStatus) {
-                            for (auto& [handle, status] : notifications) {
-                                innerCb.onStreamStatus(handle, status);
-                            }
-                        }
-                    });
-
                 // Start the WatchStatus stream at connection time so we never miss status updates
                 out->startWatching();
             }
         }
-        if (!connectFailed && out != existingOut) newOut = out;
+        // Keep the client alive even on connect failure: its background reconnect
+        // loop is the only thing that will recover, and the only shared_ptr to it
+        // is this local `out`. Without this, returning from create() drops the
+        // client and kills the reconnect loop immediately.
+        if (out != existingOut) newOut = out;
     } else {
         auto in = existingIn ? existingIn
                               : std::shared_ptr<StreamInGrpcClientInterface>(
@@ -303,20 +317,16 @@ MediaController::StreamHandle MediaControllerImpl::create(StreamType type) {
                 LogInfo(logCategory, "gRPC streamin connected (target=%s)", targetSnap.c_str());
             }
         }
-        if (!connectFailed && in != existingIn) newIn = in;
-    }
-
-    if (connectFailed) {
-        // Re-snapshot callbacks under lock, then fire outside.
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            cb = callbacks_;
-        }
-        if (cb.onStreamError) cb.onStreamError(0, StreamError::NetworkError);
-        return -1;
+        // Same reasoning as the StreamOut branch: keep the client alive on
+        // failure so any background recovery has an owner.
+        if (in != existingIn) newIn = in;
     }
 
     // --- Phase 3: short critical section --- publish + allocate handle.
+    // create() always returns a positive handle except for the explicit
+    // rejections above (invalid type, duplicate type). A connect failure
+    // still allocates a handle; its initial status is Error/NetworkError
+    // and the background reconnect loop will drive recovery.
     StreamHandle handle = -1;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -326,14 +336,41 @@ MediaController::StreamHandle MediaControllerImpl::create(StreamType type) {
         if (deviceId_ == 0 && deviceIdSnap != 0) deviceId_ = deviceIdSnap;
 
         handle = nextHandle_++;
-        streams_[handle] = {type, StreamStatus::Created, StreamError::NoError, {}};
+        StreamStatus initialStatus = connectFailed ? StreamStatus::Error : StreamStatus::Created;
+        StreamError  initialError  = connectFailed ? StreamError::NetworkError : StreamError::NoError;
+        streams_[handle] = {type, initialStatus, initialError, {}};
         cb = callbacks_;
-        LogInfo(logCategory, "created handle=%d type=%s status=Created",
-                handle, type == StreamType::StreamOut ? "StreamOut" : "StreamIn");
+        LogInfo(logCategory, "created handle=%d type=%s status=%s",
+                handle,
+                type == StreamType::StreamOut ? "StreamOut" : "StreamIn",
+                statusToString(initialStatus));
     }
 
-    if (cb.onStreamStatus) cb.onStreamStatus(handle, StreamStatus::Created);
+    if (connectFailed) {
+        if (cb.onStreamError) cb.onStreamError(handle, StreamError::NetworkError);
+    } else {
+        if (cb.onStreamStatus) cb.onStreamStatus(handle, StreamStatus::Created);
+    }
     return handle;
+}
+
+static void splitUrl(const std::string &url, std::string &address, std::string &path) {
+    // Simple parsing: assume url is in the form "rtsp://address:port/path"
+    const std::string prefix = "rtsp://";
+    if (url.compare(0, prefix.size(), prefix) == 0) {
+        std::string remainder = url.substr(prefix.size());
+        size_t slashPos = remainder.find('/');
+        if (slashPos != std::string::npos) {
+            address = remainder.substr(0, slashPos);
+            path = remainder.substr(slashPos);
+        } else {
+            address = remainder;
+            path = "/";
+        }
+    } else {
+        address = url;
+        path = "/";
+    }
 }
 
 void MediaControllerImpl::start(StreamHandle handle, const StreamConfiguration& configuration) {
@@ -408,9 +445,15 @@ void MediaControllerImpl::start(StreamHandle handle, const StreamConfiguration& 
     } else if (streamType == StreamType::StreamIn && inClient) {
         // StreamIn proto carries address/port/path in the StartStreamRequest itself.
         // StreamConfiguration has no `path` field yet — pass empty for now.
-        if (!inClient->startStream(configuration.url,
+        std::string path;
+        std::string address;
+        splitUrl(configuration.url, address, path);
+
+        LogInfo(logCategory, "StreamIn start: address=%s port=%u path=%s",
+                address.c_str(), static_cast<unsigned>(configuration.port), path.c_str());
+        if (!inClient->startStream(address,
                                    static_cast<uint32_t>(configuration.port),
-                                   /*path=*/"")) {
+                                   path)) {
             markStartupFailed();
             if (cb.onStreamError) cb.onStreamError(handle, StreamError::StartupFailed);
             return;
