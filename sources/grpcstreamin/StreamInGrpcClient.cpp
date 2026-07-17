@@ -65,8 +65,8 @@ bool StreamInGrpcClient::startStream(const std::string& address,
 
     // Use fakesink for both audio and video by default; the higher layer can
     // override later once a real pipeline mapping is decided.
-    request.mutable_asink()->set_type(collab::stream_in::SINK_TYPE_USB);
-    request.mutable_vsink()->set_type(collab::stream_in::SINK_TYPE_USB);
+    request.mutable_asink()->set_type(collab::stream_in::SINK_TYPE_FAKE);
+    request.mutable_vsink()->set_type(collab::stream_in::SINK_TYPE_AUTO);
 
     auto status = stub_->startStream(&context, request, &response);
     initLogging();

@@ -218,6 +218,59 @@ bool StreamoutGrpcClient::setPipeline(const std::string& pipeline) {
     return response.success();
 }
 
+bool StreamoutGrpcClient::StreamoutServerDebug(const std::string& debug_string) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!connected_ || !stub_) return false;
+
+    grpc::ClientContext context;
+    streamout::v1::StreamoutDebugRequest request;
+    streamout::v1::StreamoutActionResponse response;
+
+    request.set_debug_string(debug_string);
+
+    auto status = stub_->StreamoutServerDebug(&context, request, &response);
+    initLogging();
+    if (!status.ok()) {
+        LogError(logCategory, "StreamoutServerDebug failed: %s", status.error_message().c_str());
+        return false;
+    }
+
+    LogInfo(logCategory, "StreamoutServerDebug success=%d payload_bytes=%zu",
+            static_cast<int>(response.success()), debug_string.size());
+    return response.success();
+}
+
+bool StreamoutGrpcClient::setPairedDevices(const std::vector<PairedDeviceEntry>& devices) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!connected_ || !stub_) return false;
+
+    grpc::ClientContext context;
+    streamout::v1::StreamoutSetPairedDevicesRequest request;
+    streamout::v1::StreamoutActionResponse response;
+
+    // Pack every entry from the local vector into the protobuf `repeated`
+    // field. `add_devices()` appends a new PairedDevice sub-message to the
+    // request and returns a pointer we populate in place; the whole list is
+    // then sent in a single unary RPC below.
+    for (const auto& d : devices) {
+        auto* proto = request.add_devices();
+        proto->set_device_id(d.deviceId);
+        proto->set_ip_address(d.ipAddress);
+        proto->set_mac_address(d.macAddress);
+    }
+
+    auto status = stub_->StreamoutSetPairedDevices(&context, request, &response);
+    initLogging();
+    if (!status.ok()) {
+        LogError(logCategory, "setPairedDevices failed: %s", status.error_message().c_str());
+        return false;
+    }
+
+    LogInfo(logCategory, "setPairedDevices success=%d count=%zu",
+            static_cast<int>(response.success()), devices.size());
+    return response.success();
+}
+
 void StreamoutGrpcClient::setStatusCallback(StatusCallback callback) {
     std::lock_guard<std::mutex> lock(mutex_);
     statusCallback_ = std::move(callback);

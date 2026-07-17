@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include <cstdint>
+#include <list>
 
 // Forward declaration
 class MediaControllerImpl;
@@ -65,11 +66,22 @@ public:
     // Handle type for stream identification
     using StreamHandle = int;
 
+    // Could be multiple paired devices that StreamOut should trust / advertise.
+    struct PairedDevice {
+        std::string DeviceId;
+        std::string IPAddress;
+        std::string MACAddress;
+    };
+
     // Stream configuration parameters
     struct StreamConfiguration {
-        std::string url;      // IP address (e.g., "127.0.0.1", "0.0.0.0")
-        uint16_t port;        // Port number
-        std::string protocol; // Protocol (e.g., "RTSP", "RTP"); optional
+        std::string url;         // IP address (e.g., "127.0.0.1", "0.0.0.0")
+        uint16_t port;           // Port number
+        std::string protocol;    // Protocol (e.g., "RTSP", "RTP"); optional
+        std::string set_tlscert; // TLS certificate (PEM contents or path); used by both StreamIn and StreamOut
+        std::string set_tlskey;  // TLS private key (PEM contents or path); used by both StreamIn and StreamOut
+        std::string set_tlsca;   // TLS CA bundle (PEM contents or path); used by both StreamIn and StreamOut
+        std::list<PairedDevice> pairedDevices; // Paired devices for StreamOut (client identities to trust)
     };
 
     // Global callback structure for status and error notifications

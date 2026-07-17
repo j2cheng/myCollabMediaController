@@ -44,6 +44,8 @@ public:
     bool stopStream(int32_t arg) override;
     bool setPort(const std::string& port) override;
     bool setPipeline(const std::string& pipeline) override;
+    bool setPairedDevices(const std::vector<PairedDeviceEntry>& devices) override;
+    bool StreamoutServerDebug(const std::string& debug_string) override;
 
     void setStatusCallback(StatusCallback callback) override;
     void startWatching() override;

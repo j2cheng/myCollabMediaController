@@ -43,7 +43,13 @@ static const char* errorToString(MediaController::StreamError e) {
 MediaController::MediaController()
     : impl_(std::make_unique<MediaControllerImpl>()) {
     initLogging();
-    LogInfo(logCategory, "MediaControllerImpl created (built %s %s)", __DATE__, __TIME__);
+#ifdef NDEBUG
+    constexpr const char* kBuildFlavor = "Release";
+#else
+    constexpr const char* kBuildFlavor = "Debug";
+#endif
+    LogInfo(logCategory, "MediaControllerImpl created (%s build, %s %s)",
+            kBuildFlavor, __DATE__, __TIME__);
 }
 
 MediaController::~MediaController() = default;
@@ -346,11 +352,13 @@ MediaController::StreamHandle MediaControllerImpl::create(StreamType type) {
                 statusToString(initialStatus));
     }
 
-    if (connectFailed) {
-        if (cb.onStreamError) cb.onStreamError(handle, StreamError::NetworkError);
-    } else {
-        if (cb.onStreamStatus) cb.onStreamStatus(handle, StreamStatus::Created);
-    }
+    if (connectFailed && cb.onStreamError) 
+        cb.onStreamError(handle, StreamError::NetworkError);
+    
+    // Notify the caller that the handle was created successfully. This is
+    // always invoked even if the initial connect failed
+    if (cb.onStreamStatus) cb.onStreamStatus(handle, StreamStatus::Created);
+    
     return handle;
 }
 
@@ -399,12 +407,15 @@ void MediaControllerImpl::start(StreamHandle handle, const StreamConfiguration& 
             }
             cb = callbacks_;
 
-            LogInfo(logCategory, "start handle=%d type=%s url=%s port=%u status=%s",
+            LogInfo(logCategory, "start handle=%d type=%s url=%s port=%u status=%s tlscert=%zu tlskey=%zu tlsca=%zu",
                     handle,
                     streamType == StreamType::StreamOut ? "StreamOut" : "StreamIn",
                     configuration.url.c_str(),
                     static_cast<unsigned>(configuration.port),
-                    statusToString(info.status));
+                    statusToString(info.status),
+                    configuration.set_tlscert.size(),
+                    configuration.set_tlskey.size(),
+                    configuration.set_tlsca.size());
         }
     }
 
@@ -428,6 +439,65 @@ void MediaControllerImpl::start(StreamHandle handle, const StreamConfiguration& 
 
     // Dispatch to the correct gRPC client based on stream type
     if (streamType == StreamType::StreamOut && outClient) {
+        // Push TLS material to the server BEFORE StartStream. Each field is
+        // checked and sent independently via the StreamoutServerDebug RPC,
+        // with the exact prefix strings the server expects.
+        if (!configuration.set_tlscert.empty()) {
+            LogInfo(logCategory, "pushing TLS cert to server (%zu bytes)",
+                    configuration.set_tlscert.size());
+            if (!outClient->StreamoutServerDebug(
+                    "STREAMOUT_CAM2 SET_CRESTRON_CERTS " + configuration.set_tlscert)) {
+                LogError(logCategory, "failed to push TLS cert to server");
+                markStartupFailed();
+                if (cb.onStreamError) cb.onStreamError(handle, StreamError::StartupFailed);
+                return;
+            }
+        }
+
+        if (!configuration.set_tlskey.empty()) {
+            LogInfo(logCategory, "pushing TLS key to server (%zu bytes)",
+                    configuration.set_tlskey.size());
+            if (!outClient->StreamoutServerDebug(
+                    "STREAMOUT_CAM2 SET_CRESTRON_KEY " + configuration.set_tlskey)) {
+                LogError(logCategory, "failed to push TLS key to server");
+                markStartupFailed();
+                if (cb.onStreamError) cb.onStreamError(handle, StreamError::StartupFailed);
+                return;
+            }
+        }
+
+        if (!configuration.set_tlsca.empty()) {
+            LogInfo(logCategory, "pushing TLS CA to server (%zu bytes)",
+                    configuration.set_tlsca.size());
+            if (!outClient->StreamoutServerDebug(
+                    "STREAMOUT_CAM2 SET_CLIENT_CA " + configuration.set_tlsca)) {
+                LogError(logCategory, "failed to push TLS CA to server");
+                markStartupFailed();
+                if (cb.onStreamError) cb.onStreamError(handle, StreamError::StartupFailed);
+                return;
+            }
+        }
+
+        // Push the paired-device list. This is a full replacement; sending an
+        // empty vector tells the server to clear its set. Done right before
+        // setPort/startStream so the server has everything it needs by the
+        // time the stream comes up.
+        {
+            std::vector<PairedDeviceEntry> entries;
+            entries.reserve(configuration.pairedDevices.size());
+            for (const auto& d : configuration.pairedDevices) {
+                entries.push_back({d.DeviceId, d.IPAddress, d.MACAddress});
+            }
+            LogInfo(logCategory, "pushing paired devices to server (count=%zu)",
+                    entries.size());
+            if (!outClient->setPairedDevices(entries)) {
+                LogError(logCategory, "failed to push paired devices to server");
+                markStartupFailed();
+                if (cb.onStreamError) cb.onStreamError(handle, StreamError::StartupFailed);
+                return;
+            }
+        }
+
         if (!outClient->setPort(std::to_string(configuration.port))) {
             markStartupFailed();
             if (cb.onStreamError) cb.onStreamError(handle, StreamError::StartupFailed);

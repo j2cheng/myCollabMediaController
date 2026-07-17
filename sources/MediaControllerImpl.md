@@ -7,7 +7,7 @@
 | Function | Description |
 |----------|-------------|
 | `create(StreamType type)` | Allocates a unique `StreamHandle`, inserts a new `StreamInfo` entry with status `Created`, and fires `onStreamStatus` callback. Lazy-initialises and connects the gRPC client for `type` if needed; the slow `connect()` runs **outside** `mutex_` so other API calls aren't blocked during the up-to-3s `WaitForConnected`. |
-| `start(StreamHandle, StreamConfiguration)` | Validates the handle, stores the configuration, and forwards the start command to the gRPC streamout server. Does **not** change status — status updates come from the lower layer. |
+| `start(StreamHandle, StreamConfiguration)` | Validates the handle, stores the configuration, and (StreamOut only) pushes TLS material (via `StreamoutServerDebug`) and the paired-device list (via `StreamoutSetPairedDevices`) **before** issuing `StreamoutSetPort` + `StreamoutStart`. Does **not** change status locally — status updates come from the lower layer. |
 | `stop(StreamHandle)` | Validates the handle, transitions status to `Stopping`, sends `StreamoutStop` via gRPC, and fires `onStreamStatus(Stopping)` callback. Final `Stopped` status arrives asynchronously via `WatchStatus` stream. No-op for invalid or already-stopped handles. |
 | `getStatus(StreamHandle)` | Returns current `StreamStatus` for a handle, or `Idle` if the handle doesn't exist. |
 | `getLastError(StreamHandle)` | Returns the last `StreamError` for a handle, or `InvalidHandle` if not found. |
@@ -79,6 +79,13 @@ The mutex guards the shared mutable state — specifically `streams_`, `nextHand
 - `stop()` transitions to `Stopping` locally and fires `onStreamStatus(Stopping)`. The final `Stopped` transition arrives asynchronously via `WatchStatus`.
 - `Idle` is never stored — it's only returned for non-existent handles.
 - The `WatchStatus` stream is opened at **connection time** (during `create()` → `ensureStreamoutConnected()`), not at start time, to avoid the race condition where the server sends status before the watch stream is open.
+- On `start()` for **StreamOut**, the controller pushes optional TLS material and the paired-device list **before** `StreamoutSetPort` / `StreamoutStart`:
+    1. `StreamoutServerDebug("STREAMOUT_CAM2 SET_CRESTRON_CERTS <pem>")` — only if `StreamConfiguration::set_tlscert` is non-empty.
+    2. `StreamoutServerDebug("STREAMOUT_CAM2 SET_CRESTRON_KEY <pem>")`   — only if `set_tlskey` is non-empty.
+    3. `StreamoutServerDebug("STREAMOUT_CAM2 SET_CLIENT_CA <pem>")`      — only if `set_tlsca` is non-empty.
+    4. `StreamoutSetPairedDevices(devices)` — **always called**. Full-replacement contract: an empty `pairedDevices` list means "clear all" on the server.
+    5. `StreamoutSetPort(port)` then `StreamoutStart(0)`.
+  Any of those RPCs failing marks the stream `Error`/`StartupFailed`, fires `onStreamError`, and aborts before `StreamoutStart` runs.
 
 ## 4. Expected Errors
 
@@ -88,7 +95,7 @@ The mutex guards the shared mutable state — specifically `streams_`, `nextHand
 | `InvalidStreamType` | `create()` called with an unknown `StreamType`. |
 | `ResourceExhausted` | `create()` called with a `StreamType` for which a handle already exists. See § "One-handle-per-type limitation". |
 | `NetworkError` | `create()` failed — gRPC server unreachable. |
-| `StartupFailed` | `start()` — `setPort()` or `startStream()` RPC failed. |
+| `StartupFailed` | `start()` — any of the pre-start RPCs failed: `StreamoutServerDebug` (TLS cert/key/CA push), `StreamoutSetPairedDevices`, `StreamoutSetPort`, or `StreamoutStart`. |
 | `StopFailed` | `stop()` — `stopStream()` RPC failed. |
 | `NoError` | Default — no error has occurred for this handle. |
 
@@ -150,10 +157,12 @@ The mutex guards the shared mutable state — specifically `streams_`, `nextHand
 │                                │                                         │
 │  Receives:                     │  Reports back:                          │
 │    StreamoutSetProductId ◄─────┤                                         │
+│    StreamoutServerDebug ◄──────┤   (TLS cert / key / CA pushed here)     │
+│    StreamoutSetPairedDevices ◄─┤   (full-replacement paired-device list) │
+│    StreamoutSetPort ◄──────────┤                                         │
 │    StreamoutStart ◄────────────┤──► StreamoutWatchStatus (stream)        │
 │    StreamoutStop ◄─────────────┤      → READY / CLIENT_CONNECTED /      │
-│    StreamoutSetPort ◄──────────┤        STOPPED                          │
-│    StreamoutSetPipeline ◄──────┤                                         │
+│    StreamoutSetPipeline ◄──────┤        STOPPED                          │
 │                                │                                         │
 └────────────────────────────────┴────────────────────────────────────────┘
 ```

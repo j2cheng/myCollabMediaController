@@ -18,6 +18,13 @@ service StreamoutService {
   rpc StreamoutSetProductId (StreamoutSetProductIdRequest)
       returns (StreamoutActionResponse) {}
 
+  // --- Paired devices ---
+  // Full-replacement: after this RPC the server's paired-device set equals
+  // exactly what's sent. Empty devices list means "clear all".
+  // Intended to be called right before StreamoutStart.
+  rpc StreamoutSetPairedDevices (StreamoutSetPairedDevicesRequest)
+      returns (StreamoutActionResponse) {}
+
   // --- Events & Monitoring (Server-Streaming) ---
   rpc StreamoutWatchStatus (StreamoutStatusRequest)
       returns (stream StreamoutStatusResponse);
@@ -80,4 +87,16 @@ message StreamoutStatusResponse {
   int32 stream_id = 1;
   StreamStatus status_code = 2; // Cleaned up field name
   string status_info = 3;      // Cleaned up field name
+}
+
+// A single paired device the streamout server should trust / advertise.
+message PairedDevice {
+  string device_id   = 1;
+  string ip_address  = 2;
+  string mac_address = 3;
+}
+
+// Full-replacement request. The `devices` list is authoritative.
+message StreamoutSetPairedDevicesRequest {
+  repeated PairedDevice devices = 1;
 }

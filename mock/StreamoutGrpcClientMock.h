@@ -53,6 +53,20 @@ public:
         return true;
     }
 
+    bool StreamoutServerDebug(const std::string& debug_string) override {
+        std::cout << "[GrpcMock] StreamoutServerDebug(" << debug_string.size() << " bytes)" << std::endl;
+        return true;
+    }
+
+    bool setPairedDevices(const std::vector<PairedDeviceEntry>& devices) override {
+        std::cout << "[GrpcMock] setPairedDevices(count=" << devices.size() << ")" << std::endl;
+        for (const auto& d : devices) {
+            std::cout << "  - " << d.deviceId << " " << d.ipAddress << " " << d.macAddress << std::endl;
+        }
+        lastPairedDevices_ = devices;
+        return true;
+    }
+
     void setStatusCallback(StatusCallback callback) override {
         statusCallback_ = std::move(callback);
     }
@@ -69,9 +83,11 @@ public:
     }
 
     uint32_t getLastProductId() const { return lastProductId_; }
+    const std::vector<PairedDeviceEntry>& getLastPairedDevices() const { return lastPairedDevices_; }
 
 private:
     bool connected_ = false;
     uint32_t lastProductId_ = 0;
     StatusCallback statusCallback_;
+    std::vector<PairedDeviceEntry> lastPairedDevices_;
 };

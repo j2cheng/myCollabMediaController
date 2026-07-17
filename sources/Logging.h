@@ -51,6 +51,8 @@ inline void initLogging() {
 
 #include <cstdarg>
 #include <cstdio>
+#include <chrono>
+#include <ctime>
 #include <iostream>
 #include <ostream>
 
@@ -62,7 +64,23 @@ inline void mediacontrollerFallbackLog(std::ostream& os, const char* level,
     char buf[1024];
     std::vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    os << "[" << level << "] [" << LOG_TAG << "] " << buf << std::endl;
+
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  now.time_since_epoch()) % 1000;
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    char ts[64];
+    std::snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec,
+                  static_cast<int>(ms.count()));
+    os << ts << " [" << level << "] [" << LOG_TAG << "] " << buf << std::endl;
 }
 inline void initLogging() {}
 } // namespace
